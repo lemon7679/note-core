@@ -1,0 +1,4 @@
+module InkEngine {
+  header "ink/ink_c.h"
+  export *
+}

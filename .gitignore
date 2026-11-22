@@ -1,0 +1,15 @@
+# Build outputs
+build/
+build-*/
+engine/build/
+engine/build-*/
+out/
+ink_demo_out/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.xcuserstate
+xcuserdata/
+DerivedData/
