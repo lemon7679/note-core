@@ -43,6 +43,31 @@ void Bitmap::toRGBA8(uint8_t* out, size_t stride) const {
   }
 }
 
+void Bitmap::toPremultipliedRGBA8(uint8_t* out, size_t stride) const {
+  for (int y = 0; y < height_; ++y) {
+    uint8_t* row = out + static_cast<size_t>(y) * stride;
+    const float* p = pixel(0, y);
+    for (int x = 0; x < width_ * 4; x += 4) {
+      const float a = clamp01(p[x + 3]);
+      // Premultiplied channels can never exceed alpha.
+      for (int i = 0; i < 3; ++i)
+        row[x + i] = static_cast<uint8_t>(std::lround(clamp(p[x + i], 0.0f, a) * 255.0f));
+      row[x + 3] = static_cast<uint8_t>(std::lround(a * 255.0f));
+    }
+  }
+}
+
+Bitmap Bitmap::fromPremultipliedRGBA8(const uint8_t* in, int width, int height, size_t stride) {
+  Bitmap b(width, height);
+  constexpr float k = 1.0f / 255.0f;
+  for (int y = 0; y < b.height_; ++y) {
+    const uint8_t* row = in + static_cast<size_t>(y) * stride;
+    float* p = b.pixel(0, y);
+    for (int x = 0; x < b.width_ * 4; ++x) p[x] = static_cast<float>(row[x]) * k;
+  }
+  return b;
+}
+
 std::vector<uint8_t> Bitmap::toRGBA8() const {
   std::vector<uint8_t> out(static_cast<size_t>(width_) * height_ * 4);
   toRGBA8(out.data(), static_cast<size_t>(width_) * 4);

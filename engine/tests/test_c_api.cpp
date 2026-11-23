@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -185,6 +187,160 @@ TEST(c_api_correction_and_shapes) {
   ink_editor_correct(e, ids, n, 0.5f);
   ink_editor_straighten(e, ids, n, 1.0f);
   CHECK(ink_editor_stroke_count(e) == 2);
+  ink_builder_destroy(b);
+  ink_editor_destroy(e);
+}
+
+namespace {
+InkStrokeId drawLine(InkEditor* e, InkBuilder* b, float y0, float x0 = 20.0f) {
+  InkInputPoint first = pt(x0, y0, 0.0, 1);
+  ink_builder_begin(b, &first);
+  std::vector<InkInputPoint> pts;
+  for (int i = 1; i <= 60; ++i) pts.push_back(pt(x0 + i * 2.0f, y0 + 4.0f * std::sin(i * 0.2f), i / 240.0, i + 1));
+  ink_builder_add_points(b, pts.data(), pts.size());
+  ink_builder_end(b);
+  return ink_editor_commit(e, b);
+}
+}  // namespace
+
+TEST(c_api_render_over_matches_render_rgba) {
+  InkEditor* e = ink_editor_create(200, 100);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_FOUNTAIN_PEN);
+  REQUIRE(e && b);
+  drawLine(e, b, 40);
+  ink_builder_set_brush(b, INK_BRUSH_HIGHLIGHTER, InkColor{1.0f, 0.85f, 0.2f, 1.0f}, 10.0f);
+  drawLine(e, b, 45);
+  REQUIRE(ink_editor_stroke_count(e) == 2);
+
+  const int w = 200, h = 100;
+  std::vector<uint8_t> ref(w * h * 4), over(w * h * 4, 255);  // opaque white background
+  ink_editor_render_rgba(e, ref.data(), w, h, w * 4, 1.0f, 0, 0, InkColor{1, 1, 1, 1}, nullptr);
+  ink_editor_render_over_rgba(e, over.data(), w, h, w * 4, 1.0f, 0, 0);
+  int maxDiff = 0;
+  size_t inked = 0;
+  for (size_t i = 0; i < ref.size(); ++i) {
+    int d = std::abs(static_cast<int>(ref[i]) - static_cast<int>(over[i]));
+    if (d > maxDiff) maxDiff = d;
+    if ((i & 3) == 0 && over[i] < 200) ++inked;
+  }
+  // Opaque background: straight == premultiplied; only the cached (denser) tessellation may differ.
+  CHECK(maxDiff <= 8);
+  CHECK(inked > 100);
+
+  // Tiles: rendering two halves with offsets reproduces the whole page.
+  std::vector<uint8_t> left(100 * h * 4, 255), right(100 * h * 4, 255);
+  ink_editor_render_over_rgba(e, left.data(), 100, h, 100 * 4, 1.0f, 0, 0);
+  ink_editor_render_over_rgba(e, right.data(), 100, h, 100 * 4, 1.0f, -100, 0);
+  int tileDiff = 0;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x)
+      for (int c = 0; c < 4; ++c) {
+        uint8_t v = x < 100 ? left[(y * 100 + x) * 4 + c] : right[(y * 100 + x - 100) * 4 + c];
+        tileDiff = std::max(tileDiff, std::abs(static_cast<int>(v) - static_cast<int>(over[(y * w + x) * 4 + c])));
+      }
+  CHECK(tileDiff <= 1);
+  ink_builder_destroy(b);
+  ink_editor_destroy(e);
+}
+
+TEST(c_api_builder_overlay_is_premultiplied) {
+  InkBuilder* b = ink_builder_create(INK_BRUSH_BALLPOINT);
+  REQUIRE(b);
+  ink_builder_set_color(b, InkColor{0.0f, 0.0f, 1.0f, 1.0f});
+  const int w = 120, h = 60;
+  std::vector<uint8_t> px(w * h * 4, 0);
+  ink_builder_render_over_rgba(b, px.data(), w, h, w * 4, 1.0f, 0, 0);  // no geometry yet: no-op
+  for (uint8_t v : px) CHECK(v == 0);
+
+  InkInputPoint first = pt(10, 30, 0.0, 1);
+  ink_builder_begin(b, &first);
+  std::vector<InkInputPoint> pts;
+  for (int i = 1; i <= 40; ++i) pts.push_back(pt(10.0f + i * 2.5f, 30.0f, i / 240.0, i + 1));
+  ink_builder_add_points(b, pts.data(), pts.size());
+  InkLiveGeometry live;
+  REQUIRE(ink_builder_update_geometry(b, 1.0f, &live));
+  ink_builder_render_over_rgba(b, px.data(), w, h, w * 4, 1.0f, 0, 0);
+  size_t covered = 0;
+  bool premultiplied = true;
+  for (size_t i = 0; i < px.size(); i += 4) {
+    if (px[i + 3] > 100) ++covered;
+    if (px[i + 2] > px[i + 3] || px[i] > px[i + 3]) premultiplied = false;
+  }
+  CHECK(covered > 40);
+  CHECK(premultiplied);
+  // Drawing the overlay does not advance the incremental geometry.
+  InkLiveGeometry again;
+  REQUIRE(ink_builder_update_geometry(b, 1.0f, &again));
+  CHECK(!again.stable_reset);
+  ink_builder_destroy(b);
+}
+
+TEST(c_api_clipboard_duplicate_bounds) {
+  InkEditor* a = ink_editor_create(300, 200);
+  InkEditor* c = ink_editor_create(300, 200);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_BALLPOINT);
+  REQUIRE(a && b && c);
+  InkStrokeId ids[2] = {drawLine(a, b, 40), drawLine(a, b, 90)};
+  REQUIRE(ids[0] && ids[1]);
+  InkRect r = ink_editor_bounds_of(a, ids, 2);
+  CHECK(r.width > 100.0f);
+  CHECK(r.y < 40.0f && r.y + r.height > 90.0f);
+
+  InkStrokeId dup[4];
+  CHECK(ink_editor_duplicate(a, ids, 2, 5, 5, dup, 4) == 2);
+  CHECK(ink_editor_stroke_count(a) == 4);
+  CHECK(ink_editor_undo(a));
+  CHECK(ink_editor_stroke_count(a) == 2);
+
+  size_t size = 0;
+  uint8_t* clip = ink_editor_copy_strokes(a, ids, 2, &size);
+  REQUIRE(clip && size > 0);
+  InkStrokeId pasted[4];
+  CHECK(ink_editor_paste_strokes(c, clip, size, 0, 50, pasted, 4) == 2);
+  ink_free(clip);
+  CHECK(ink_editor_stroke_count(c) == 2);
+  InkRect pr = ink_editor_bounds_of(c, pasted, 2);
+  CHECK_NEAR(pr.y, r.y + 50.0f, 0.01);
+  CHECK(ink_editor_undo(c));  // one undo step removes the whole paste
+  CHECK(ink_editor_stroke_count(c) == 0);
+  CHECK(ink_editor_paste_strokes(c, reinterpret_cast<const uint8_t*>("junk"), 4, 0, 0, nullptr, 0) == 0);
+  CHECK_NEAR(ink_editor_page_width(c), 300.0, 1e-6);
+  CHECK_NEAR(ink_editor_page_height(c), 200.0, 1e-6);
+  ink_builder_destroy(b);
+  ink_editor_destroy(a);
+  ink_editor_destroy(c);
+}
+
+TEST(c_api_hidden_and_selected_rendering) {
+  InkEditor* e = ink_editor_create(200, 100);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_MARKER);
+  REQUIRE(e && b);
+  InkStrokeId top = drawLine(e, b, 25);
+  InkStrokeId bottom = drawLine(e, b, 75);
+  REQUIRE(top && bottom);
+  const int w = 200, h = 100;
+  auto inkedRows = [&](const std::vector<uint8_t>& px, int y0, int y1) {
+    size_t n = 0;
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < w; ++x)
+        if (px[(y * w + x) * 4 + 3] > 128) ++n;
+    return n;
+  };
+  std::vector<uint8_t> px(w * h * 4, 0);
+  ink_editor_set_hidden(e, &top, 1);
+  ink_editor_render_over_rgba(e, px.data(), w, h, w * 4, 1.0f, 0, 0);
+  CHECK(inkedRows(px, 0, 50) == 0);
+  CHECK(inkedRows(px, 50, 100) > 50);
+
+  std::fill(px.begin(), px.end(), 0);
+  ink_editor_render_strokes_over_rgba(e, &top, 1, px.data(), w, h, w * 4, 1.0f, 0, 0);
+  CHECK(inkedRows(px, 0, 50) > 50);
+  CHECK(inkedRows(px, 50, 100) == 0);
+
+  ink_editor_set_hidden(e, nullptr, 0);
+  std::fill(px.begin(), px.end(), 0);
+  ink_editor_render_over_rgba(e, px.data(), w, h, w * 4, 1.0f, 0, 0);
+  CHECK(inkedRows(px, 0, 50) > 50);
   ink_builder_destroy(b);
   ink_editor_destroy(e);
 }

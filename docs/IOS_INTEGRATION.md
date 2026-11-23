@@ -1,7 +1,9 @@
 # iPad 연동 가이드
 
 엔진은 C API(`engine/include/ink/ink_c.h`)로 Swift에 노출됩니다.
-`engine/include`를 Header Search Paths(또는 Swift Import Paths)에 추가하면 함께 들어 있는
+가장 쉬운 방법은 저장소 루트의 `Package.swift`를 SwiftPM 의존성으로 추가하는 것입니다
+(`.product(name: "InkEngine", package: "note-core")`). xtool(Linux/WSL)과 Xcode 모두 같은 방식으로
+빌드됩니다. 직접 연결하려면 `engine/include`를 Header Search Paths에 추가하면 함께 들어 있는
 `module.modulemap` 덕분에 `import InkEngine`으로 바로 쓸 수 있습니다.
 정적 라이브러리는 README의 iOS 빌드 명령으로 만들거나, `engine/src/*.cpp`를 Xcode 타깃에
 직접 추가해도 됩니다 (C++17).
@@ -201,6 +203,25 @@ ink_editor_render_rgba(editor, &pixels, Int32(w), Int32(h), w * 4, s,
    - `live.tail`은 매 프레임 별도 텍스처에 그리고, 합성 시 두 커버리지의 max를 사용
 4. **연필 결**: `ink_grain_texture(&size)`를 R8Unorm 256×256, `.repeat` 주소 모드, 선형 필터,
    밉맵 없음으로 업로드합니다.
+
+### 타일 CPU 렌더러 (note-ipad가 사용하는 방식)
+GPU 렌더러를 붙이기 전에도 120 Hz 필기가 가능하도록, 화면을 512 px 안팎의 타일로 나누고
+타일 단위로 CPU 렌더링합니다. 두 함수가 이를 위해 있습니다.
+
+```swift
+// 1) 확정된 획: 타일 버퍼에 종이 템플릿/PDF 배경을 Core Graphics로 먼저 그린 뒤 (premultipliedLast, RGBA)
+ink_editor_render_over_rgba(editor, tile.bytes, w, h, stride, scale, -tileOriginX, -tileOriginY)
+// 형광펜 Multiply가 실제 배경(PDF 글자 포함)에 적용되고, 테셀레이션은 줌 구간별로 캐시됩니다.
+
+// 2) 실시간 획: 매 프레임 ink_builder_update_geometry 후 live.dirty에 걸리는 오버레이 타일만
+memset(overlay.bytes, 0, overlay.count)
+ink_builder_render_over_rgba(builder, overlay.bytes, w, h, stride, scale, -tileOriginX, -tileOriginY)
+// 직전 update_geometry 결과(stable + tail + 예측점)를 그리며, 증분 상태는 바꾸지 않습니다.
+```
+
+올가미 편집용으로 `ink_editor_bounds_of`(선택 영역 사각형), `ink_editor_duplicate`,
+`ink_editor_copy_strokes` / `ink_editor_paste_strokes`(페이지 간 복사·붙여넣기, 실행 취소 1단계),
+선택 영역을 끌 때 미리보기용 `ink_editor_set_hidden` + `ink_editor_render_strokes_over_rgba`가 있습니다.
 
 셰이더는 Linux CI에서 컴파일되지 않으므로, 연동 시 같은 페이지를
 `ink_editor_render_rgba`(CPU)와 Metal로 각각 그려 픽셀 비교 테스트를 만들어 두기를 권장합니다.

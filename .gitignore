@@ -13,3 +13,8 @@ ink_demo_out/
 *.xcuserstate
 xcuserdata/
 DerivedData/
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved

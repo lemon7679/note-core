@@ -99,6 +99,40 @@ std::vector<StrokeId> PageEditor::duplicate(const std::vector<StrokeId>& ids, Ve
   return out;
 }
 
+std::vector<StrokeId> PageEditor::addStrokes(const std::vector<Stroke>& strokes, Vec2 offset) {
+  std::vector<StrokeId> out;
+  Layer* layer = page_.layer(activeLayer_);
+  if (!layer || layer->locked) return out;
+  ChangeSet cs;
+  LayerChange lc;
+  lc.layer = activeLayer_;
+  size_t at = layer->size();
+  for (const Stroke& src : strokes) {
+    if (src.points.empty()) continue;
+    auto copy = std::make_shared<Stroke>(src);
+    copy->id = page_.allocateStrokeId();
+    for (StrokePoint& p : copy->points) p.pos += offset;
+    copy->updateBounds();
+    out.push_back(copy->id);
+    lc.added.emplace_back(at++, std::move(copy));
+  }
+  if (lc.added.empty()) return out;
+  cs.layers.push_back(std::move(lc));
+  applyChange(page_, cs);
+  record(std::move(cs), "Paste");
+  return out;
+}
+
+Rect PageEditor::boundsOf(const std::vector<StrokeId>& ids) const {
+  Rect r;
+  for (const Layer& layer : page_.layers())
+    for (StrokeId id : ids) {
+      long i = layer.indexOf(id);
+      if (i >= 0) r.expand(layer.at(static_cast<size_t>(i))->bounds);
+    }
+  return r;
+}
+
 void PageEditor::clearLayer() {
   Layer* layer = page_.layer(activeLayer_);
   if (!layer) return;

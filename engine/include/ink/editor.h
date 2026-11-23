@@ -50,6 +50,11 @@ class PageEditor {
   bool recolor(const std::vector<StrokeId>& ids, Color color);
   bool remove(const std::vector<StrokeId>& ids);
   std::vector<StrokeId> duplicate(const std::vector<StrokeId>& ids, Vec2 offset);
+  /// Adds copies of `strokes` (e.g. pasted from another page) to the active
+  /// layer, moved by `offset`, as one undo step. Returns the new ids.
+  std::vector<StrokeId> addStrokes(const std::vector<Stroke>& strokes, Vec2 offset);
+  /// Union of the ink bounds of `ids` (empty when none exist).
+  Rect boundsOf(const std::vector<StrokeId>& ids) const;
   void clearLayer();
 
   // --- 글씨 보정 on existing strokes (one undo step each) ---

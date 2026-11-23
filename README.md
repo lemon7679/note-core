@@ -97,7 +97,7 @@ engine/
   include/module.modulemap   Swift에서 `import InkEngine`
   src/                구현
   shaders/ink_stroke.metal   iPad용 Metal 셰이더 (레퍼런스)
-  tests/              단위 테스트 70개
+  tests/              단위 테스트 74개
   tools/              데모(PNG 생성), 벤치마크, 합성 입력 생성기
 docs/
   ARCHITECTURE.md     엔진 설계와 튜닝 포인트
@@ -113,6 +113,17 @@ cmake --build build
 ./build/ink_demo out       # 샘플 이미지 생성 → out/*.png, out/fountain.svg
 ./build/ink_bench          # 성능 측정
 ```
+
+Swift Package (iPad 앱 `note-ipad`가 사용하는 방식, xtool/WSL·Xcode 공통):
+
+```swift
+// Package.swift
+.package(url: "https://github.com/lemon7679/note-core.git", branch: "main"),
+// 타깃 의존성
+.product(name: "InkEngine", package: "note-core"),
+```
+
+Swift 코드에서는 `import InkEngine`으로 C API만 보이므로 C++ 상호 운용 설정이 필요 없습니다.
 
 iOS 정적 라이브러리:
 
@@ -136,6 +147,7 @@ cmake --build build-ios --config Release
 
 ## 다음 단계
 
-1. iPad 앱 셸: 입력 처리(`docs/IOS_INTEGRATION.md`)와 Metal 렌더러 연결
+1. ~~iPad 앱 셸~~ → [`note-ipad`](https://github.com/lemon7679/note-ipad): xtool(WSL) 빌드, 타일 CPU 렌더러,
+   NAS(Synology·WebDAV·SMB) 동기화, PDF 뷰어/주석. 이후 Metal 렌더러로 교체 예정
 2. 실제 Apple Pencil로 펜별 파라미터 미세 조정 (`engine/src/brush.cpp` 프리셋)
-3. PDF 내보내기, 페이지 타일 캐시, 노트북(다중 페이지) 저장소
+3. 페이지 타일 캐시의 GPU 버전 (`engine/shaders/ink_stroke.metal`)

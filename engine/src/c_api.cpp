@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <new>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "ink/editor.h"
 #include "ink/rasterizer.h"
@@ -38,10 +39,24 @@ struct InkEditor {
   };
   std::unordered_map<StrokeId, Cached> cache;
   std::unordered_map<StrokeId, StrokePtr> index;
+  std::unordered_set<StrokeId> hidden;  // skipped by render_over (lasso drag preview)
   bool indexDirty = true;
 
   InkEditor(float w, float h) : editor(w, h) {}
   void touched() { indexDirty = true; }
+  /// Tessellation of `s` at the zoom bucket of `ppu`, cached per stroke.
+  const StrokeGeometry& geometry(const StrokePtr& s, float bucket) {
+    Cached& c = cache[s->id];
+    if (c.stroke != s || c.ppu != bucket) {
+      c.stroke = s;
+      c.ppu = bucket;
+      c.geom.clear();
+      TessellationOptions opts;
+      opts.pixelsPerUnit = bucket;
+      Tessellator::tessellate(*s, opts, c.geom);
+    }
+    return c.geom;
+  }
   void rebuildIndex() {
     if (!indexDirty) return;
     index.clear();
@@ -284,6 +299,28 @@ bool ink_builder_update_geometry(InkBuilder* b, float pixels_per_unit, InkLiveGe
   return true;
 }
 
+void ink_builder_render_over_rgba(const InkBuilder* b, uint8_t* pixels, int width, int height, size_t stride,
+                                  float scale, float offset_x, float offset_y) {
+  if (!b || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
+  const LiveGeometry& live = b->builder.lastGeometry();
+  if (!live.stable || !live.tail) return;
+  thread_local StrokeGeometry combined;
+  combined.clear();
+  combined.append(*live.stable);
+  combined.append(*live.tail);
+  if (combined.empty()) return;
+  const Affine t = Affine::translate(offset_x, offset_y) * Affine::scale(scale);
+  // Skip the float conversion when the stroke misses this tile entirely.
+  const Rect px = t.apply(combined.bounds).inflated(2.0f);
+  if (px.maxX < 0.0f || px.maxY < 0.0f || px.minX > static_cast<float>(width) || px.minY > static_cast<float>(height))
+    return;
+  Bitmap bmp = Bitmap::fromPremultipliedRGBA8(pixels, width, height, stride);
+  RenderOptions opts;
+  opts.drawBackground = false;
+  Rasterizer::renderGeometry(combined, b->builder.brush().style, bmp, t, opts);
+  bmp.toPremultipliedRGBA8(pixels, stride);
+}
+
 // ---------------------------------------------------------------- editor
 
 InkEditor* ink_editor_create(float w, float h) { return new (std::nothrow) InkEditor(w, h); }
@@ -419,18 +456,8 @@ bool ink_editor_stroke_geometry(InkEditor* e, InkStrokeId id, float ppu, InkGeom
   e->rebuildIndex();
   auto it = e->index.find(id);
   if (it == e->index.end()) return false;
-  const float bucket = ppuBucket(ppu);
-  InkEditor::Cached& c = e->cache[id];
-  if (c.stroke != it->second || c.ppu != bucket) {
-    c.stroke = it->second;
-    c.ppu = bucket;
-    c.geom.clear();
-    TessellationOptions opts;
-    opts.pixelsPerUnit = bucket;
-    Tessellator::tessellate(*c.stroke, opts, c.geom);
-  }
-  *out = view(c.geom);
-  if (style) fillStyle(c.stroke->style, style);
+  *out = view(e->geometry(it->second, ppuBucket(ppu)));
+  if (style) fillStyle(it->second->style, style);
   return true;
 }
 
@@ -449,6 +476,141 @@ void ink_editor_render_rgba(InkEditor* e, uint8_t* pixels, int width, int height
   }
   bmp.toRGBA8(pixels, stride);
 }
+
+}  // extern "C"
+
+namespace {
+// Composites strokes accepted by `want` over premultiplied pixels, honouring
+// layer visibility/opacity and the draw-behind pass like Rasterizer::renderPage.
+template <typename Filter>
+void renderOver(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale, float offset_x,
+                float offset_y, Filter want) {
+  e->rebuildIndex();
+  Bitmap bmp = Bitmap::fromPremultipliedRGBA8(pixels, width, height, stride);
+  const Affine t = Affine::translate(offset_x, offset_y) * Affine::scale(scale);
+  RenderOptions opts;
+  opts.drawBackground = false;
+  const Rect clipPx(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+  const Rect pageClip = t.inverse().apply(clipPx).inflated(1.0f);
+  const float bucket = ppuBucket(scale);
+  std::vector<size_t> visible;
+  bool drew = false;
+  auto drawLayer = [&](const Layer& layer, Bitmap& target) {
+    visible.clear();
+    layer.query(pageClip, visible);
+    for (int pass = 0; pass < 2; ++pass)
+      for (size_t idx : visible) {
+        const StrokePtr& s = layer.at(idx);
+        if (s->style.drawBehind != (pass == 0) || !want(s->id)) continue;
+        Rasterizer::renderGeometry(e->geometry(s, bucket), s->style, target, t, opts);
+        drew = true;
+      }
+  };
+  for (const Layer& layer : e->editor.page().layers()) {
+    if (!layer.visible || layer.opacity <= 0.0f) continue;
+    if (layer.opacity >= 0.999f) {
+      drawLayer(layer, bmp);
+      continue;
+    }
+    // Translucent layer: render in isolation, then fade it in as a whole.
+    Bitmap tmp(width, height);
+    drawLayer(layer, tmp);
+    const float o = layer.opacity;
+    for (int y = 0; y < height; ++y)
+      for (int x = 0; x < width; ++x) {
+        const float* sp = tmp.pixel(x, y);
+        if (sp[3] <= 0.0f) continue;
+        float* d = bmp.pixel(x, y);
+        const float sa = sp[3] * o;
+        for (int i = 0; i < 3; ++i) d[i] = sp[i] * o + d[i] * (1.0f - sa);
+        d[3] = sa + d[3] * (1.0f - sa);
+      }
+  }
+  if (drew) bmp.toPremultipliedRGBA8(pixels, stride);
+}
+}  // namespace
+
+extern "C" {
+
+void ink_editor_render_over_rgba(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale,
+                                 float offset_x, float offset_y) {
+  if (!e || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
+  if (e->hidden.empty()) {
+    renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y, [](StrokeId) { return true; });
+  } else {
+    renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y,
+               [e](StrokeId id) { return e->hidden.count(id) == 0; });
+  }
+}
+
+void ink_editor_set_hidden(InkEditor* e, const InkStrokeId* ids, size_t count) {
+  if (!e) return;
+  e->hidden.clear();
+  if (ids)
+    for (size_t i = 0; i < count; ++i) e->hidden.insert(ids[i]);
+}
+
+void ink_editor_render_strokes_over_rgba(InkEditor* e, const InkStrokeId* ids, size_t count, uint8_t* pixels,
+                                         int width, int height, size_t stride, float scale, float offset_x,
+                                         float offset_y) {
+  if (!e || !ids || count == 0 || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
+  std::unordered_set<StrokeId> wanted(ids, ids + count);
+  renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y,
+             [&wanted](StrokeId id) { return wanted.count(id) != 0; });
+}
+
+size_t ink_editor_duplicate(InkEditor* e, const InkStrokeId* ids, size_t count, float dx, float dy, InkStrokeId* out,
+                            size_t capacity) {
+  if (!e || !ids || count == 0) return 0;
+  e->touched();
+  std::vector<StrokeId> created = e->editor.duplicate(std::vector<StrokeId>(ids, ids + count), Vec2{dx, dy});
+  if (out)
+    for (size_t i = 0; i < created.size() && i < capacity; ++i) out[i] = created[i];
+  return created.size();
+}
+
+InkRect ink_editor_bounds_of(const InkEditor* e, const InkStrokeId* ids, size_t count) {
+  if (!e || !ids || count == 0) return InkRect{0, 0, 0, 0};
+  return toC(e->editor.boundsOf(std::vector<StrokeId>(ids, ids + count)));
+}
+
+uint8_t* ink_editor_copy_strokes(const InkEditor* e, const InkStrokeId* ids, size_t count, size_t* out_size) {
+  if (out_size) *out_size = 0;
+  if (!e || !ids || count == 0) return nullptr;
+  const Page& src = e->editor.page();
+  Page clip(src.width, src.height);
+  Layer& dst = clip.addLayer("Clipboard");
+  std::unordered_map<StrokeId, bool> wanted;
+  for (size_t i = 0; i < count; ++i) wanted[ids[i]] = true;
+  for (const Layer& layer : src.layers())
+    for (const StrokePtr& s : layer.strokes())
+      if (wanted.count(s->id)) dst.append(s);
+  if (dst.empty()) return nullptr;
+  std::vector<uint8_t> data = serializePage(clip);
+  uint8_t* p = static_cast<uint8_t*>(std::malloc(data.size()));
+  if (!p) return nullptr;
+  std::memcpy(p, data.data(), data.size());
+  if (out_size) *out_size = data.size();
+  return p;
+}
+
+size_t ink_editor_paste_strokes(InkEditor* e, const uint8_t* data, size_t size, float dx, float dy, InkStrokeId* out,
+                                size_t capacity) {
+  if (!e || !data || size == 0) return 0;
+  Page clip;
+  if (!deserializePage(data, size, clip)) return 0;
+  std::vector<Stroke> strokes;
+  for (const Layer& layer : clip.layers())
+    for (const StrokePtr& s : layer.strokes()) strokes.push_back(*s);
+  e->touched();
+  std::vector<StrokeId> created = e->editor.addStrokes(strokes, Vec2{dx, dy});
+  if (out)
+    for (size_t i = 0; i < created.size() && i < capacity; ++i) out[i] = created[i];
+  return created.size();
+}
+
+float ink_editor_page_width(const InkEditor* e) { return e ? e->editor.page().width : 0.0f; }
+float ink_editor_page_height(const InkEditor* e) { return e ? e->editor.page().height : 0.0f; }
 
 uint8_t* ink_editor_save(const InkEditor* e, size_t* out_size) {
   if (!e) return nullptr;

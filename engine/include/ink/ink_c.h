@@ -188,6 +188,14 @@ size_t ink_builder_point_count(const InkBuilder* b);
 void ink_builder_get_style(const InkBuilder* b, InkStyleInfo* out);
 /* pixels_per_unit = zoom * screen scale. */
 bool ink_builder_update_geometry(InkBuilder* b, float pixels_per_unit, InkLiveGeometry* out);
+/* CPU live-stroke overlay: composites the geometry of the last
+ * ink_builder_update_geometry call (stable + tail, including predicted points)
+ * over premultiplied RGBA8 pixels (Core Graphics premultipliedLast, RGBA
+ * order). Page point (x, y) maps to pixel (x * scale + offset_x,
+ * y * scale + offset_y). Use a transparent buffer for an overlay tile, or the
+ * tile's background for an exact preview. No-op before the first update. */
+void ink_builder_render_over_rgba(const InkBuilder* b, uint8_t* pixels, int width, int height, size_t stride,
+                                  float scale, float offset_x, float offset_y);
 
 /* -------------------------------------------------------------- editor */
 InkEditor* ink_editor_create(float page_width, float page_height);
@@ -218,6 +226,17 @@ bool ink_editor_transform(InkEditor* e, const InkStrokeId* ids, size_t count, fl
                           float tx, float ty);
 bool ink_editor_recolor(InkEditor* e, const InkStrokeId* ids, size_t count, InkColor color);
 bool ink_editor_delete(InkEditor* e, const InkStrokeId* ids, size_t count);
+/* Copies of `ids` moved by (dx, dy), as one undo step. Returns the number of new
+ * strokes; at most `capacity` ids are written to `out` (may be NULL). */
+size_t ink_editor_duplicate(InkEditor* e, const InkStrokeId* ids, size_t count, float dx, float dy, InkStrokeId* out,
+                            size_t capacity);
+/* Union of the strokes' ink bounds (page units); width 0 when none exist. */
+InkRect ink_editor_bounds_of(const InkEditor* e, const InkStrokeId* ids, size_t count);
+/* Clipboard: serializes the strokes (free with ink_free) and pastes them into
+ * any page, moved by (dx, dy), as one undo step. */
+uint8_t* ink_editor_copy_strokes(const InkEditor* e, const InkStrokeId* ids, size_t count, size_t* out_size);
+size_t ink_editor_paste_strokes(InkEditor* e, const uint8_t* data, size_t size, float dx, float dy, InkStrokeId* out,
+                                size_t capacity);
 
 /* 글씨 보정 on existing strokes (each call = one undo step). */
 bool ink_editor_correct(InkEditor* e, const InkStrokeId* ids, size_t count, float strength);
@@ -238,10 +257,27 @@ bool ink_editor_stroke_geometry(InkEditor* e, InkStrokeId id, float pixels_per_u
  * (x * scale + offset_x, y * scale + offset_y). `live` may be NULL. */
 void ink_editor_render_rgba(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale,
                             float offset_x, float offset_y, InkColor background, const InkBuilder* live);
+/* Tile rendering: composites the page's strokes over premultiplied RGBA8
+ * pixels that already hold the paper / PDF background, so highlighter
+ * Multiply darkens the real background. Uses the cached tessellation of
+ * ink_editor_stroke_geometry, so re-rendering tiles at one zoom is cheap. */
+void ink_editor_render_over_rgba(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale,
+                                 float offset_x, float offset_y);
+/* Lasso drag preview: strokes in the hidden set are skipped by
+ * ink_editor_render_over_rgba (count 0 clears the set), while
+ * ink_editor_render_strokes_over_rgba draws only `ids` (e.g. into a floating
+ * layer that follows the finger). Commit the move with ink_editor_transform. */
+void ink_editor_set_hidden(InkEditor* e, const InkStrokeId* ids, size_t count);
+void ink_editor_render_strokes_over_rgba(InkEditor* e, const InkStrokeId* ids, size_t count, uint8_t* pixels,
+                                         int width, int height, size_t stride, float scale, float offset_x,
+                                         float offset_y);
 
 /* Persistence. */
 uint8_t* ink_editor_save(const InkEditor* e, size_t* out_size);
 bool ink_editor_load(InkEditor* e, const uint8_t* data, size_t size);
+/* Page size in page units (pt). */
+float ink_editor_page_width(const InkEditor* e);
+float ink_editor_page_height(const InkEditor* e);
 char* ink_editor_export_svg(const InkEditor* e);
 
 #ifdef __cplusplus

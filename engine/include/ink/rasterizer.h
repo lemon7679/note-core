@@ -26,6 +26,10 @@ class Bitmap {
 
   /// Straight-alpha 8-bit RGBA, rows of `stride` bytes.
   void toRGBA8(uint8_t* out, size_t stride) const;
+  /// Premultiplied 8-bit RGBA (Core Graphics `premultipliedLast`, RGBA byte order).
+  void toPremultipliedRGBA8(uint8_t* out, size_t stride) const;
+  /// Loads premultiplied 8-bit RGBA pixels (e.g. a paper / PDF background to draw ink over).
+  static Bitmap fromPremultipliedRGBA8(const uint8_t* in, int width, int height, size_t stride);
   std::vector<uint8_t> toRGBA8() const;
   /// Un-premultiplied color of a pixel.
   Color colorAt(int x, int y) const;

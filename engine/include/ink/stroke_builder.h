@@ -106,6 +106,10 @@ class StrokeBuilder {
   /// Incremental live geometry (see LiveGeometry). Pointers stay valid until
   /// the next mutating call.
   const LiveGeometry& updateGeometry(const TessellationOptions& opts);
+  /// Geometry of the most recent updateGeometry() call (empty pointers before
+  /// the first one). Lets a renderer redraw the live stroke without advancing
+  /// the incremental state.
+  const LiveGeometry& lastGeometry() const { return live_; }
 
   /// The finished stroke (call after end()). Id is assigned by the page.
   Stroke buildStroke() const;
