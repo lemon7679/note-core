@@ -1,0 +1,74 @@
+name: iPad IPA
+
+# Builds the note-ipad app (public repo) against this engine on macOS:
+#  1. an unsigned Release IPA (install with `xtool install`, Sideloadly or AltStore),
+#  2. a Debug build run in an iPad Simulator with demo content drawn by the engine.
+# Results are uploaded as a workflow artifact. With `push_tag`, they are also
+# committed (orphan commit) under refs/tags/ipa-build/<version> so the files can be
+# fetched with plain git; delete that tag after use.
+on:
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: note-ipad branch, tag or commit
+        default: main
+      version:
+        description: Version (CFBundleShortVersionString)
+        default: 0.1.0
+      push_tag:
+        description: Also push the results as refs/tags/ipa-build/<version>
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: note-core
+      - uses: actions/checkout@v4
+        with:
+          repository: lemon7679/note-ipad
+          ref: ${{ inputs.app_ref }}
+          path: note-ipad
+      - name: Engine tests
+        run: |
+          cmake -S note-core/engine -B engine-build -DCMAKE_BUILD_TYPE=Release -DINK_BUILD_TOOLS=OFF > /dev/null
+          cmake --build engine-build -j 4 > /dev/null
+          ./engine-build/ink_tests | tail -1
+      - name: Build IPA
+        run: |
+          xcodebuild -version
+          note-ipad/ci/build-ipa.sh "${{ inputs.version }}" "$GITHUB_WORKSPACE/out"
+          echo "app: $(git -C note-ipad rev-parse HEAD)  engine: $(git -C note-core rev-parse HEAD)" > out/build-info.txt
+      - name: Run in iPad Simulator (real engine)
+        run: |
+          NOTE_ENGINE=core PRINT_SHOTS=0 note-ipad/ci/simulator-screenshots.sh
+          mkdir -p out/screenshots
+          cp note-ipad/shot-*.jpg out/screenshots/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NoteApp-${{ inputs.version }}
+          path: |
+            out/*.ipa
+            out/build-info.txt
+            out/screenshots
+      - name: Push results tag
+        if: inputs.push_tag
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          mkdir carrier && cd carrier
+          git init -q
+          cp ../out/*.ipa ../out/build-info.txt .
+          cp -R ../out/screenshots .
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "iPad IPA ${{ inputs.version }}"
+          git push -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" \
+            "HEAD:refs/tags/ipa-build/${{ inputs.version }}"
