@@ -95,6 +95,20 @@ struct SmoothingParams {
   float speedTau = 0.035f;     ///< s, speed EMA time constant.
 };
 
+/// 글씨 보정 (handwriting correction) settings; see ink/correction.h.
+struct CorrectionParams {
+  /// 0 = off, 1 = strong. Scales every threshold below.
+  float strength = 0.0f;
+  bool liveStabilization = true;  ///< Smooth while writing (adds a few ms of lag, disables prediction).
+  bool smoothCurves = true;       ///< Remove wobble from curved parts at pen-up.
+  bool straightenLines = true;    ///< Near-straight segments become straight.
+  bool snapToAxes = true;         ///< Near-horizontal / vertical segments become exact.
+
+  bool enabled() const { return strength > 0.0f; }
+  /// Moving-average window (ms) used for live stabilization at this strength.
+  float liveWindowMs() const { return lerp(14.0f, 42.0f, clamp01(strength)); }
+};
+
 /// Everything needed to turn raw input into stroke points.
 struct BrushDynamics {
   float width = mmToPt(0.5f);  ///< Nominal diameter (page units) at mid pressure.
@@ -121,6 +135,9 @@ struct BrushDynamics {
   bool snapOnHold = true;
   float holdDuration = 0.55f;  ///< Seconds the pen must rest.
   float holdTolerance = 2.5f;  ///< View points of allowed wobble while resting.
+
+  // 글씨 보정: applied when the pen lifts (off by default).
+  CorrectionParams correction;
 
   // Built-in motion prediction (use the platform's predicted touches when available).
   bool builtInPrediction = false;

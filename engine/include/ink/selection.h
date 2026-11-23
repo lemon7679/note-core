@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <utility>
 #include <vector>
 
 #include "ink/page.h"
@@ -20,9 +22,20 @@ std::vector<StrokeId> rectSelect(const Layer& layer, const Rect& rect);
 /// Bounds of the given strokes.
 Rect selectionBounds(const Layer& layer, const std::vector<StrokeId>& ids);
 
+/// Replaces each listed stroke in place (same z-order) with `fn(stroke)`:
+/// return the same pointer to leave it unchanged, nullptr to delete it.
+ChangeSet mapStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids,
+                     const std::function<StrokePtr(const StrokePtr&)>& fn);
+
+/// Copy of a stroke mapped through an affine transform (widths scale, nib
+/// angles and tilt azimuths rotate with it).
+StrokePtr transformedStroke(const Stroke& stroke, const Affine& t);
+
 /// Applies an affine transform (move / scale / rotate) to strokes in place.
 /// Widths scale with the transform; nib angles and tilt azimuths rotate.
 ChangeSet transformStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, const Affine& t);
+/// A different transform per stroke, as one change.
+ChangeSet transformEach(Page& page, LayerId layer, const std::vector<std::pair<StrokeId, Affine>>& transforms);
 ChangeSet recolorStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, Color color);
 ChangeSet deleteStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids);
 /// Duplicates strokes (new ids) on top of the layer, offset by `offset`.

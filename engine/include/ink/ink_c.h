@@ -65,7 +65,9 @@ typedef enum InkShape {
   INK_SHAPE_RECTANGLE,
   INK_SHAPE_QUAD,
   INK_SHAPE_ELLIPSE,
-  INK_SHAPE_CIRCLE
+  INK_SHAPE_CIRCLE,
+  INK_SHAPE_ARC,
+  INK_SHAPE_POLYGON /* pentagon / hexagon */
 } InkShape;
 
 typedef struct InkColor {
@@ -157,6 +159,20 @@ void ink_builder_set_builtin_prediction(InkBuilder* b, bool enabled);
 /* Zoom: view points per page unit. */
 void ink_builder_set_view_scale(InkBuilder* b, float view_points_per_unit);
 
+/* 글씨 보정 (handwriting correction). strength 0 = off .. 1 = strong.
+ * Applied when the pen lifts; with live stabilization the stroke is also
+ * smoothed while writing. */
+void ink_builder_set_correction(InkBuilder* b, float strength);
+void ink_builder_set_correction_options(InkBuilder* b, bool live_stabilization, bool smooth_curves,
+                                        bool straighten_lines, bool snap_to_axes);
+
+/* Draw-and-hold shapes. After a shape snaps, keep moving the pen (without
+ * lifting) to resize / rotate it. While `constrained` is true (e.g. a second
+ * finger is down) the shape is perfect: circle, square, equilateral triangle,
+ * regular polygon, 15°-stepped line. */
+void ink_builder_set_shape_constraint(InkBuilder* b, bool constrained);
+bool ink_builder_shape_is_regular(const InkBuilder* b);
+
 void ink_builder_begin(InkBuilder* b, const InkInputPoint* p);
 void ink_builder_add_points(InkBuilder* b, const InkInputPoint* pts, size_t count);
 void ink_builder_set_predicted(InkBuilder* b, const InkInputPoint* pts, size_t count);
@@ -202,6 +218,11 @@ bool ink_editor_transform(InkEditor* e, const InkStrokeId* ids, size_t count, fl
                           float tx, float ty);
 bool ink_editor_recolor(InkEditor* e, const InkStrokeId* ids, size_t count, InkColor color);
 bool ink_editor_delete(InkEditor* e, const InkStrokeId* ids, size_t count);
+
+/* 글씨 보정 on existing strokes (each call = one undo step). */
+bool ink_editor_correct(InkEditor* e, const InkStrokeId* ids, size_t count, float strength);
+/* Straighten written lines: removes slant and levels drifting words. strength 0..1. */
+bool ink_editor_straighten(InkEditor* e, const InkStrokeId* ids, size_t count, float strength);
 
 /* Area (page units) that changed since the last call. */
 InkRect ink_editor_take_dirty(InkEditor* e);

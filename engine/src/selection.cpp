@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ink {
@@ -75,11 +76,8 @@ Rect selectionBounds(const Layer& layer, const std::vector<StrokeId>& ids) {
   return r;
 }
 
-namespace {
-
-/// Replaces each selected stroke (in place, same index) with `fn(old)`.
-ChangeSet replaceStrokes(Page& page, LayerId layerId, const std::vector<StrokeId>& ids,
-                         const std::function<StrokePtr(const Stroke&)>& fn) {
+ChangeSet mapStrokes(Page& page, LayerId layerId, const std::vector<StrokeId>& ids,
+                     const std::function<StrokePtr(const StrokePtr&)>& fn) {
   ChangeSet cs;
   Layer* layer = page.layer(layerId);
   if (!layer || layer->locked) return cs;
@@ -89,8 +87,10 @@ ChangeSet replaceStrokes(Page& page, LayerId layerId, const std::vector<StrokeId
   for (size_t i = 0; i < layer->size(); ++i) {
     const StrokePtr& s = layer->at(i);
     if (!wanted.count(s->id)) continue;
-    StrokePtr repl = fn(*s);
+    StrokePtr repl = fn(s);
+    if (repl == s) continue;  // unchanged
     lc.removed.emplace_back(i, s);
+    // Index in the post-edit layer: shifted by the net removals before it.
     if (repl) lc.added.emplace_back(i - (lc.removed.size() - lc.added.size() - 1), std::move(repl));
   }
   if (lc.removed.empty()) return cs;
@@ -99,34 +99,42 @@ ChangeSet replaceStrokes(Page& page, LayerId layerId, const std::vector<StrokeId
   return cs;
 }
 
-}  // namespace
-
-ChangeSet transformStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, const Affine& t) {
+StrokePtr transformedStroke(const Stroke& s, const Affine& t) {
   const float scale = t.uniformScale();
   const float rotation = std::atan2(t.b, t.a);
-  return replaceStrokes(page, layer, ids, [&](const Stroke& s) {
-    auto out = std::make_shared<Stroke>(s);
-    for (StrokePoint& p : out->points) {
-      p.pos = t.apply(p.pos);
-      p.width *= scale;
-      p.azimuth = wrapAngle(p.azimuth + rotation);
-    }
-    out->style.nibAngle = wrapAngle(out->style.nibAngle + rotation);
-    out->updateBounds();
-    return out;
-  });
+  auto out = std::make_shared<Stroke>(s);
+  for (StrokePoint& p : out->points) {
+    p.pos = t.apply(p.pos);
+    p.width *= scale;
+    p.azimuth = wrapAngle(p.azimuth + rotation);
+  }
+  out->style.nibAngle = wrapAngle(out->style.nibAngle + rotation);
+  out->updateBounds();
+  return out;
+}
+
+ChangeSet transformStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, const Affine& t) {
+  return mapStrokes(page, layer, ids, [&](const StrokePtr& s) { return transformedStroke(*s, t); });
+}
+
+ChangeSet transformEach(Page& page, LayerId layer, const std::vector<std::pair<StrokeId, Affine>>& transforms) {
+  std::unordered_map<StrokeId, Affine> byId(transforms.begin(), transforms.end());
+  std::vector<StrokeId> ids;
+  ids.reserve(transforms.size());
+  for (const auto& e : transforms) ids.push_back(e.first);
+  return mapStrokes(page, layer, ids, [&](const StrokePtr& s) { return transformedStroke(*s, byId.at(s->id)); });
 }
 
 ChangeSet recolorStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, Color color) {
-  return replaceStrokes(page, layer, ids, [&](const Stroke& s) {
-    auto out = std::make_shared<Stroke>(s);
+  return mapStrokes(page, layer, ids, [&](const StrokePtr& s) {
+    auto out = std::make_shared<Stroke>(*s);
     out->style.color = color;
-    return out;
+    return StrokePtr(out);
   });
 }
 
 ChangeSet deleteStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids) {
-  return replaceStrokes(page, layer, ids, [](const Stroke&) { return StrokePtr(); });
+  return mapStrokes(page, layer, ids, [](const StrokePtr&) { return StrokePtr(); });
 }
 
 ChangeSet duplicateStrokes(Page& page, LayerId layerId, const std::vector<StrokeId>& ids, Vec2 offset) {

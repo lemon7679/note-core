@@ -15,6 +15,7 @@ endif()
 add_library(inkengine
   src/brush.cpp
   src/c_api.cpp
+  src/correction.cpp
   src/editor.cpp
   src/eraser.cpp
   src/filters.cpp
@@ -54,6 +55,7 @@ if(INK_BUILD_TESTS)
     tests/test_document.cpp
     tests/test_render.cpp
     tests/test_c_api.cpp
+    tests/test_shapes_correction.cpp
     tools/synth_input.cpp
   )
   target_link_libraries(ink_tests PRIVATE inkengine)

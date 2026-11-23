@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "ink/input.h"
@@ -38,5 +39,23 @@ std::vector<ink::Vec2> ellipse(ink::Vec2 center, float rx, float ry, float wobbl
                                float startAngle = -1.6f, float sweep = 6.45f);
 /// "Handwritten" signature-like scribble from a seed.
 std::vector<ink::Vec2> scribble(ink::Vec2 origin, float width, float height, uint32_t seed);
+
+/// Stroke paths of a Hangul syllable from a small built-in set
+/// (가 나 다 라 마 바 사 아 한 글 보 정), written in a box of `size` at `origin`
+/// (top-left). `messiness` (0..1) perturbs corners and stroke angles like a
+/// hurried hand. Unknown characters yield no strokes.
+std::vector<std::vector<ink::Vec2>> hangul(char32_t syllable, ink::Vec2 origin, float size, uint32_t seed,
+                                           float messiness);
+
+/// A line of text: every stroke of every syllable as synthesized input, with
+/// realistic per-stroke timing. `baseline(i)` returns the vertical offset of
+/// syllable i, `slantRadians` rotates the whole line about its start.
+struct WrittenStroke {
+  std::vector<ink::InputPoint> input;
+  size_t syllable = 0;
+};
+std::vector<WrittenStroke> writeLine(const std::u32string& text, ink::Vec2 origin, float size, uint32_t seed,
+                                     float messiness, float slantRadians = 0.0f,
+                                     const std::vector<float>& baseline = {});
 
 }  // namespace synth

@@ -127,3 +127,64 @@ TEST(c_api_null_safety) {
   ink_builder_destroy(nullptr);
   ink_free(nullptr);
 }
+
+TEST(c_api_correction_and_shapes) {
+  InkEditor* e = ink_editor_create(400, 200);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_BALLPOINT);
+  REQUIRE(e && b);
+  // A tilted bar with correction on: becomes exactly horizontal.
+  ink_builder_set_correction(b, 0.6f);
+  ink_builder_set_correction_options(b, true, true, true, true);
+  InkInputPoint first = pt(10, 50, 0.0, 1);
+  ink_builder_begin(b, &first);
+  std::vector<InkInputPoint> pts;
+  for (int i = 1; i <= 60; ++i) pts.push_back(pt(10.0f + i, 50.0f + i * 0.05f, i / 240.0, i + 1));
+  ink_builder_add_points(b, pts.data(), pts.size());
+  ink_builder_end(b);
+  REQUIRE(ink_editor_commit(e, b) != 0);
+  InkStrokeId id;
+  REQUIRE(ink_editor_query(e, InkRect{0, 0, 400, 200}, &id, 1) == 1);
+  InkGeometryView g;
+  REQUIRE(ink_editor_stroke_geometry(e, id, 2.0f, &g, nullptr));
+  REQUIRE(g.capsule_count > 2);
+  for (size_t i = 0; i < g.capsule_count; ++i) CHECK_NEAR(g.capsules[i].y0, g.capsules[0].y0, 1e-3);
+
+  // Draw-and-hold an ellipse with the constraint on -> perfect circle.
+  ink_builder_set_correction(b, 0.0f);
+  ink_builder_set_snap_on_hold(b, true);
+  InkInputPoint s0 = pt(300, 60, 1.0, 0);
+  ink_builder_begin(b, &s0);
+  double t = 1.0;
+  for (int i = 1; i <= 200; ++i) {
+    float a = -1.5708f + 6.4f * i / 200.0f;
+    t += 1.0 / 240.0;
+    InkInputPoint q = pt(300.0f + 70.0f * std::cos(a), 100.0f + 40.0f * std::sin(a), t, 0);
+    ink_builder_add_points(b, &q, 1);
+  }
+  bool snapped = false;
+  InkInputPoint rest = pts.back();
+  rest.x = 300.0f + 70.0f * std::cos(-1.5708f + 6.4f);
+  rest.y = 100.0f + 40.0f * std::sin(-1.5708f + 6.4f);
+  for (int k = 0; k < 200 && !snapped; ++k) {
+    t += 1.0 / 240.0;
+    rest.time = t;
+    ink_builder_add_points(b, &rest, 1);
+    snapped = ink_builder_tick(b, t) || ink_builder_snapped_shape(b) != INK_SHAPE_NONE;
+  }
+  CHECK(ink_builder_snapped_shape(b) == INK_SHAPE_ELLIPSE);
+  ink_builder_set_shape_constraint(b, true);
+  CHECK(ink_builder_shape_is_regular(b));
+  ink_builder_end(b);
+  ink_builder_set_shape_constraint(b, false);
+  CHECK(ink_editor_commit(e, b) != 0);
+
+  // Editor-side correction and straightening are undoable no-ops on clean input.
+  InkStrokeId ids[4];
+  size_t n = ink_editor_query(e, InkRect{0, 0, 400, 200}, ids, 4);
+  CHECK(n == 2);
+  ink_editor_correct(e, ids, n, 0.5f);
+  ink_editor_straighten(e, ids, n, 1.0f);
+  CHECK(ink_editor_stroke_count(e) == 2);
+  ink_builder_destroy(b);
+  ink_editor_destroy(e);
+}

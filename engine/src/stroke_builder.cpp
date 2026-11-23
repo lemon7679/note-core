@@ -43,6 +43,9 @@ void StrokeBuilder::resetState() {
   startTaperScale_ = 1.0f;
   endTaperLength_ = 0.0f;
   snappedShape_ = ShapeType::None;
+  baseShape_ = RecognizedShape{};
+  currentShape_ = RecognizedShape{};
+  correctionReport_ = CorrectionReport{};
   filter_.reset();
   finished_ = false;
   geomValid_ = false;
@@ -67,7 +70,15 @@ void StrokeBuilder::begin(const InputPoint& p, uint32_t seed) {
   active_ = true;
   const BrushDynamics& dyn = brush_.dynamics;
   filter_.setParams(p.source == InputSource::Pencil ? dyn.smoothing.pencil : dyn.smoothing.touch);
-  stabilizer_.setParams(dyn.smoothing.stabilizer);
+  // 글씨 보정's live part: a gentle moving average while writing (unless the
+  // user already picked an explicit stabilizer).
+  StabilizerParams stab = dyn.smoothing.stabilizer;
+  if (stab.mode == StabilizerMode::None && dyn.correction.enabled() && dyn.correction.liveStabilization) {
+    stab.mode = StabilizerMode::MovingAverage;
+    stab.amount = dyn.correction.liveWindowMs();
+    stab.catchUp = true;
+  }
+  stabilizer_.setParams(stab);
   startTime_ = lastInputTime_ = lastFilterTime_ = p.time;
   seed_ = seed != 0 ? seed
                     : hash32(static_cast<uint32_t>(p.time * 1000.0),
@@ -94,6 +105,7 @@ void StrokeBuilder::begin(const InputPoint& p, uint32_t seed) {
 
   holdAnchor_ = p.pos;
   holdAnchorTime_ = p.time;
+  lastPen_ = f;
 }
 
 void StrokeBuilder::addPoints(const InputPoint* pts, size_t count) {
@@ -117,8 +129,9 @@ void StrokeBuilder::addPoint(const InputPoint& in) {
   lastFilterTime_ = p.time;
   Vec2 f = filter_.filter(p.pos, dt, viewScale_);
 
+  lastPen_ = f;
   if (snapped()) {
-    updateSnappedLine(f);
+    updateSnappedShape(f);
     return;
   }
   processFiltered(f, p.time, idx);
@@ -250,7 +263,7 @@ void StrokeBuilder::setPredictedPoints(const InputPoint* pts, size_t count) {
   predicted_.clear();
   if (!active_ || snapped() || points_.empty()) return;
   // A stabilized stroke intentionally trails the pen; predicting would defeat it.
-  if (brush_.dynamics.smoothing.stabilizer.mode != StabilizerMode::None) return;
+  if (stabilizer_.params().mode != StabilizerMode::None) return;
   OneEuroFilter2D f = filter_;  // copy: prediction must not disturb the real filter
   double lastT = lastFilterTime_;
   Vec2 lastPos = points_.back().pos;
@@ -274,7 +287,7 @@ void StrokeBuilder::clearPredicted() { predicted_.clear(); }
 void StrokeBuilder::buildPrediction() {
   predicted_.clear();
   if (!active_ || snapped() || points_.empty()) return;
-  if (brush_.dynamics.smoothing.stabilizer.mode != StabilizerMode::None) return;
+  if (stabilizer_.params().mode != StabilizerMode::None) return;
   const BrushDynamics& dyn = brush_.dynamics;
   if (length(velocity_) * viewScale_ < 60.0f) return;  // nothing to hide when slow
   Vec2 disp = velocity_ * dyn.predictionHorizon;
@@ -374,23 +387,51 @@ bool StrokeBuilder::trySnap() {
   templ.time = 0.0f;
   templ.flags = 0;
 
-  points_ = shapeToStrokePoints(shape, templ);
-  aux_.assign(points_.size(), Aux{});
-  for (size_t i = 1; i < points_.size(); ++i)
-    aux_[i].dist = aux_[i - 1].dist + distance(points_[i - 1].pos, points_[i].pos);
+  snapTemplate_ = templ;
+  baseShape_ = shape;
+  snapPen_ = lastPen_;
   snappedShape_ = shape.type;
   predicted_.clear();
-  invalidateGeometry();
+  updateSnappedShape(lastPen_);
   return true;
 }
 
-void StrokeBuilder::updateSnappedLine(Vec2 pos) {
-  // After a line snaps, keep following the pen so the user can adjust the end
-  // point before lifting (GoodNotes-style).
-  if (snappedShape_ != ShapeType::Line || points_.size() != 2) return;
-  points_[1].pos = snapLineEnd(points_[0].pos, pos, ShapeRecognizerOptions{}.angleSnapDegrees);
-  aux_[1].dist = distance(points_[0].pos, pos);
+void StrokeBuilder::setShapeConstraint(bool constrained) {
+  if (shapeConstraint_ == constrained) return;
+  shapeConstraint_ = constrained;
+  if (active_ && snapped()) updateSnappedShape(lastPen_);
+}
+
+void StrokeBuilder::updateSnappedShape(Vec2 pen) {
+  // After snapping, the pen keeps steering the shape until it lifts
+  // (QuickShape-style): a line's end follows the pen; other shapes scale and
+  // rotate about their anchor so the point under the pen stays under it.
+  ShapeRecognizerOptions opts;
+  RecognizedShape s = shapeConstraint_ ? regularizeShape(baseShape_, opts, true) : baseShape_;
+  if (s.type == ShapeType::Line && s.vertices.size() == 2) {
+    s.vertices[1] = shapeConstraint_ ? snapLineEnd(s.vertices[0], pen, 7.5f, 15.0f)
+                                     : snapLineEnd(s.vertices[0], pen, opts.angleSnapDegrees);
+  } else {
+    const bool rotatable = s.type != ShapeType::Circle;
+    // The soft rotation dead zone keeps a pure resize from tilting the shape.
+    Affine t = dragTransform(s.anchor(), snapPen_, pen, rotatable, 6.0f * kPi / 180.0f);
+    s = transformShape(s, t);
+  }
+  currentShape_ = s;
+  points_ = shapeToStrokePoints(s, snapTemplate_);
+  aux_.assign(points_.size(), Aux{});
+  for (size_t i = 1; i < points_.size(); ++i)
+    aux_[i].dist = aux_[i - 1].dist + distance(points_[i - 1].pos, points_[i].pos);
   invalidateGeometry();
+}
+
+void StrokeBuilder::applyCorrection() {
+  const CorrectionParams& cp = brush_.dynamics.correction;
+  if (!cp.enabled() || points_.size() < 3) return;
+  if (!correctStroke(points_, cp, unitsPerViewPoint(), &correctionReport_)) return;
+  aux_[0].dist = 0.0f;
+  for (size_t i = 1; i < points_.size(); ++i)
+    aux_[i].dist = aux_[i - 1].dist + distance(points_[i - 1].pos, points_[i].pos);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,12 +451,13 @@ void StrokeBuilder::end() {
     stabilizer_.flush(scratchStab_);
     for (const StabilizedSample& s : scratchStab_) appendControl(s.pos, s.time, s.source);
     // Finish exactly under the pen (removes the 1€ filter's residual lag).
-    const StabilizerParams& sp = brush_.dynamics.smoothing.stabilizer;
+    const StabilizerParams& sp = stabilizer_.params();
     if (sp.mode == StabilizerMode::None || sp.catchUp) {
       const uint32_t lastIdx = static_cast<uint32_t>(raw_.size() - 1);
       appendControl(raw_[lastIdx].input.pos, raw_[lastIdx].input.time, lastIdx);
     }
     removeHooks();
+    applyCorrection();
     finalizeTapers();
   }
   active_ = false;

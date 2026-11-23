@@ -165,4 +165,111 @@ std::vector<Vec2> scribble(Vec2 origin, float width, float height, uint32_t seed
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Hangul handwriting
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct GlyphStroke {
+  std::vector<Vec2> pts;  // polyline in a 20 x 22 box, or empty for an ellipse
+  Vec2 c, r;              // ellipse
+};
+
+std::vector<GlyphStroke> glyph(char32_t ch) {
+  using P = std::vector<Vec2>;
+  auto L = [](P p) { return GlyphStroke{std::move(p), {}, {}}; };
+  auto O = [](Vec2 c, Vec2 r) { return GlyphStroke{{}, c, r}; };
+  const GlyphStroke aV = L({{14, 2}, {14, 20}}), aH = L({{14, 11}, {18, 11}});  // ㅏ
+  switch (ch) {
+    case U'가': return {L({{2, 5}, {10, 5}, {9.5f, 10}, {6, 17}}), aV, aH};
+    case U'나': return {L({{3, 4}, {3, 16}, {11, 16}}), aV, aH};
+    case U'다': return {L({{3, 5}, {10, 5}}), L({{3, 5}, {3, 16}, {11, 16}}), aV, aH};
+    case U'라': return {L({{2, 4}, {10, 4}, {10, 10}, {2, 10}, {2, 16}, {11, 16}}), aV, aH};
+    case U'마': return {L({{3, 4}, {3, 16}}), L({{3, 4}, {11, 4}, {11, 16}, {3, 16}}), aV, aH};
+    case U'바': return {L({{3, 3}, {3, 16}}), L({{10, 3}, {10, 16}}), L({{3, 9}, {10, 9}}), L({{3, 16}, {10, 16}}), aV, aH};
+    case U'사': return {L({{7, 4}, {6, 9}, {2, 16}}), L({{6.5f, 9}, {11, 16}}), aV, aH};
+    case U'아': return {O({7, 10}, {4.5f, 5.5f}), aV, aH};
+    case U'한':
+      return {L({{5, 1.5f}, {8, 2.5f}}), L({{3, 4.5f}, {11, 4.5f}}), O({7, 8.5f}, {3, 2.6f}),
+              L({{14.5f, 1}, {14.5f, 13}}), L({{14.5f, 6.5f}, {18, 6.5f}}), L({{5, 14}, {5, 20}, {16, 20}})};
+    case U'글':
+      return {L({{4, 2}, {15, 2}, {14.5f, 7}}), L({{2, 9.5f}, {18, 9.5f}}),
+              L({{4, 12}, {15, 12}, {15, 15.5f}, {4, 15.5f}, {4, 19.5f}, {16, 19.5f}})};
+    case U'보':
+      return {L({{5, 2}, {5, 10}}), L({{13, 2}, {13, 10}}), L({{5, 6}, {13, 6}}), L({{5, 10}, {13, 10}}),
+              L({{9, 11}, {9, 15}}), L({{2, 16}, {17, 16}})};
+    case U'정':
+      return {L({{2, 3}, {10, 3}, {4, 12}}), L({{6.5f, 7}, {11, 12}}), L({{16, 1}, {16, 14}}),
+              L({{12.5f, 7}, {16, 7}}), O({9, 17.5f}, {3.5f, 3})};
+    default: return {};
+  }
+}
+
+}  // namespace
+
+std::vector<std::vector<Vec2>> hangul(char32_t syllable, Vec2 origin, float size, uint32_t seed, float messiness) {
+  std::vector<std::vector<Vec2>> out;
+  const float k = size / 20.0f;
+  uint32_t n = 0;
+  auto rnd = [&]() { return ink::hashToUnit(ink::hash32(seed, n++)) * 2.0f - 1.0f; };
+  for (const GlyphStroke& g : glyph(syllable)) {
+    if (g.pts.empty()) {
+      Vec2 c = origin + g.c * k + Vec2{rnd(), rnd()} * (messiness * 0.8f * k);
+      out.push_back(ellipse(c, g.r.x * k * (1.0f + 0.1f * messiness * rnd()), g.r.y * k, 0.03f + 0.04f * messiness,
+                            seed + n, -1.7f + 0.3f * rnd(), 6.45f));
+      continue;
+    }
+    // A hurried hand: corners land off-target and strokes are slightly tilted.
+    float tilt = rnd() * messiness * 0.09f;
+    std::vector<Vec2> pts;
+    Vec2 first = g.pts.front();
+    for (Vec2 p : g.pts) {
+      Vec2 d = p - first;
+      Vec2 r{d.x * std::cos(tilt) - d.y * std::sin(tilt), d.x * std::sin(tilt) + d.y * std::cos(tilt)};
+      pts.push_back(origin + (first + r) * k + Vec2{rnd(), rnd()} * (messiness * 0.6f * k));
+    }
+    out.push_back(polyline(pts, 0.4f));
+  }
+  return out;
+}
+
+std::vector<WrittenStroke> writeLine(const std::u32string& text, Vec2 origin, float size, uint32_t seed,
+                                     float messiness, float slant, const std::vector<float>& baseline) {
+  std::vector<WrittenStroke> out;
+  double t = 0.0;
+  const float advance = size * 1.12f;
+  float x = 0.0f;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == U' ') {
+      x += size * 0.7f;
+      continue;
+    }
+    float dy = i < baseline.size() ? baseline[i] : 0.0f;
+    Vec2 local{x, dy};
+    Vec2 rotated{local.x * std::cos(slant) - local.y * std::sin(slant), local.x * std::sin(slant) + local.y * std::cos(slant)};
+    auto strokes = hangul(text[i], origin + rotated, size, seed + static_cast<uint32_t>(i) * 31u, messiness);
+    // Rotate each glyph by the slant as well (the whole line is tilted).
+    for (auto& path : strokes) {
+      for (Vec2& p : path) {
+        Vec2 d = p - (origin + rotated);
+        p = origin + rotated + Vec2{d.x * std::cos(slant) - d.y * std::sin(slant), d.x * std::sin(slant) + d.y * std::cos(slant)};
+      }
+      Options o;
+      o.seed = seed + static_cast<uint32_t>(out.size()) * 7u + 1u;
+      o.speed = 140.0f;
+      o.tremor = 0.25f + 0.6f * messiness;
+      o.jitter = 0.12f + 0.2f * messiness;
+      o.startTime = t;
+      WrittenStroke ws;
+      ws.input = synthesize(path, o);
+      ws.syllable = i;
+      t = ws.input.back().time + 0.12;
+      out.push_back(std::move(ws));
+    }
+    x += advance;
+  }
+  return out;
+}
+
 }  // namespace synth

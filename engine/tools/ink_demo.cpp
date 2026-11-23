@@ -185,39 +185,130 @@ void sheetEraser() {
   std::printf("%zu strokes\n", ed.page().strokeCount());
 }
 
+/// Draws `path`, then rests the pen (draw-and-hold). Optionally keeps the pen
+/// down and drags it by `drag` afterwards (resize / rotate the snapped shape).
+Stroke drawAndHold(const Brush& brush, std::vector<InputPoint> in, Vec2 drag = {}, bool constrained = false,
+                   ShapeType* type = nullptr) {
+  StrokeBuilder b(brush);
+  b.begin(in.front());
+  for (size_t i = 1; i < in.size(); ++i) b.addPoint(in[i]);
+  InputPoint rest = in.back();
+  for (int k = 0; k < 160; ++k) {
+    rest.time += 1.0 / 240.0;
+    b.addPoint(rest);
+    b.tick(rest.time);
+  }
+  b.setShapeConstraint(constrained);
+  const Vec2 from = rest.pos;
+  for (int k = 1; k <= 60 && (drag.x != 0.0f || drag.y != 0.0f); ++k) {
+    rest.time += 1.0 / 240.0;
+    rest.pos = from + drag * (static_cast<float>(k) / 60.0f);
+    b.addPoint(rest);
+  }
+  b.end();
+  if (type) *type = b.snappedShape();
+  return b.buildStroke();
+}
+
 void sheetShapes() {
-  PageEditor ed(640, 420);
+  // Top: as drawn (wobbly). Below each: what the pen-hold turns it into.
+  PageEditor ed(780, 620);
   Brush pen = presets::ballpoint(colors::kInkBlue, mmToPt(0.6f));
-  std::vector<std::vector<Vec2>> shapes = {
-      synth::ellipse({70, 75}, 48, 46, 0.05f, 1),
-      synth::ellipse({200, 75}, 70, 35, 0.04f, 2, -1.6f, 6.5f),
-      synth::polyline({{300, 30}, {404, 34}, {402, 118}, {301, 115}, {301, 33}}),
-      synth::polyline({{480, 120}, {530, 30}, {585, 118}, {478, 121}}),
-      synth::polyline({{20, 160}, {330, 166}}),
-      synth::polyline({{360, 150}, {450, 190}, {600, 150}}),
+  Brush ghost = pen;
+  ghost.style.color = Color(0.62f, 0.66f, 0.78f);
+  struct Item {
+    std::vector<Vec2> path;
+    Vec2 drag;
+    bool constrained;
+  };
+  std::vector<Item> items = {
+      {synth::ellipse({70, 70}, 48, 46, 0.05f, 1), {}, false},
+      {synth::ellipse({200, 70}, 66, 34, 0.04f, 2, -1.6f, 6.5f), {}, false},
+      {synth::polyline({{295, 28}, {388, 31}, {386, 121}, {296, 118}, {296, 30}}), {}, false},          // ~square
+      {synth::polyline({{470, 116}, {517, 30}, {566, 115}, {468, 118}}), {}, false},                    // ~equilateral
+      {synth::polyline({{610, 30}, {611, 116}, {745, 117}, {612, 31}}), {}, false},                     // ~right triangle
+      {synth::polyline({{68, 196}, {116, 230}, {98, 286}, {39, 287}, {21, 231}, {68, 196}}), {}, false},  // ~pentagon
+      {synth::polyline({{150, 240}, {176, 198}, {226, 196}, {252, 240}, {226, 284}, {176, 285}, {150, 240}}),
+       {}, false},                                                                                         // hexagon-ish
+      {synth::ellipse({330, 262}, 48, 46, 0.03f, 3, 3.3f, 3.0f), {}, false},                            // semicircle arc
+      {synth::polyline({{420, 210}, {600, 215}}), {}, false},                                           // line
+      {synth::polyline({{630, 200}, {680, 270}, {760, 200}}), {}, false},                               // check-ish polyline
   };
   uint32_t seed = 40;
-  for (const auto& p : shapes) {
+  for (const Item& it : items) {
     synth::Options o = opt(seed++);
     o.jitter = 0.35f;
     o.tremor = 1.2f;
-    auto in = synth::synthesize(p, o);
-    add(ed, draw(pen, in));  // as drawn
-    for (InputPoint& q : in) q.pos.y += 200;
-    StrokeBuilder b(pen);
-    b.begin(in.front());
-    for (size_t i = 1; i < in.size(); ++i) b.addPoint(in[i]);
-    InputPoint rest = in.back();
-    for (int k = 0; k < 160; ++k) {
-      rest.time += 1.0 / 240.0;
-      b.addPoint(rest);
-      b.tick(rest.time);
-    }
-    b.end();
-    std::printf("    shape -> %s\n", shapeTypeName(b.snappedShape()));
-    add(ed, b.buildStroke());
+    auto in = synth::synthesize(it.path, o);
+    add(ed, draw(ghost, in));  // as drawn
+    for (InputPoint& q : in) q.pos.y += 300;
+    ShapeType type;
+    add(ed, drawAndHold(pen, in, it.drag, it.constrained, &type));
+    std::printf("    shape -> %s\n", shapeTypeName(type));
   }
   save(ed.page(), 2.0f, "shapes.png");
+
+  // Hold, then keep moving the pen: the snapped shape follows (resize / rotate).
+  PageEditor drag(640, 200);
+  synth::Options o = opt(77);
+  o.tremor = 1.0f;
+  auto circle = synth::synthesize(synth::ellipse({90, 100}, 30, 28, 0.05f, 8), o);
+  add(drag, draw(ghost, circle));
+  add(drag, drawAndHold(pen, circle, {0, -35}));           // pen at the top moves up: bigger circle
+  auto rect = synth::synthesize(synth::polyline({{230, 70}, {330, 72}, {329, 130}, {231, 128}, {231, 71}}), o);
+  add(drag, draw(ghost, rect));
+  add(drag, drawAndHold(pen, rect, {-30, 5}));             // corner pulled out: bigger + slightly rotated
+  auto ell = synth::synthesize(synth::ellipse({500, 100}, 80, 40, 0.04f, 9), o);
+  add(drag, draw(ghost, ell));
+  add(drag, drawAndHold(pen, ell, {}, /*constrained=*/true));  // second finger: perfect circle
+  save(drag.page(), 2.0f, "shapes_drag.png");
+}
+
+/// Same handwriting drawn three times: without correction, medium, strong.
+void sheetCorrection() {
+  PageEditor ed(620, 400);
+  const float strengths[] = {0.0f, 0.5f, 1.0f};
+  for (int row = 0; row < 3; ++row) {
+    Brush pen = presets::ballpoint(colors::kBlack, mmToPt(0.55f));
+    pen.dynamics.correction.strength = strengths[row];
+    float y = 16.0f + 128.0f * row;
+    auto lines = synth::writeLine(U"가나다라 마바사아", {16, y}, 30, 7, 1.0f);
+    auto second = synth::writeLine(U"한글 보정", {16, y + 50}, 30, 99, 1.0f);
+    lines.insert(lines.end(), second.begin(), second.end());
+    int snapped = 0, straight = 0;
+    for (const auto& ws : lines) {
+      StrokeBuilder b(pen);
+      b.begin(ws.input.front());
+      for (size_t i = 1; i < ws.input.size(); ++i) b.addPoint(ws.input[i]);
+      b.end();
+      snapped += b.correctionReport().axisSnapped;
+      straight += b.correctionReport().straightened;
+      add(ed, b.buildStroke());
+    }
+    std::printf("    correction %.1f: %d straightened, %d axis-snapped segments\n", strengths[row], straight, snapped);
+  }
+  save(ed.page(), 2.0f, "correction.png");
+}
+
+/// Slanted, wavy lines before and after straightenHandwriting.
+void sheetStraighten() {
+  PageEditor ed(620, 400);
+  Brush pen = presets::ballpoint(colors::kInkBlue, mmToPt(0.5f));
+  std::vector<float> wave;
+  for (int i = 0; i < 12; ++i) wave.push_back(5.0f * std::sin(i * 0.55f));  // words drifting up and down
+  std::vector<StrokeId> bottom;
+  for (int copy = 0; copy < 2; ++copy) {
+    float oy = copy * 200.0f;
+    auto a = synth::writeLine(U"가나다라 마바사아", {20, 30 + oy}, 26, 5, 0.5f, 0.10f, wave);
+    auto b = synth::writeLine(U"한글 보정 가나다", {24, 110 + oy}, 26, 6, 0.5f, -0.06f, wave);
+    a.insert(a.end(), b.begin(), b.end());
+    for (const auto& ws : a) {
+      StrokeId id = ed.commitStroke(draw(pen, ws.input));
+      if (copy == 1) bottom.push_back(id);
+    }
+  }
+  ed.straighten(bottom);
+  save(ed.page(), 2.0f, "straighten.png");
 }
 
 void sheetZoom() {
@@ -261,6 +352,8 @@ int main(int argc, char** argv) {
   sheetPencil();
   sheetEraser();
   sheetShapes();
+  sheetCorrection();
+  sheetStraighten();
   sheetZoom();
   sheetLive();
 

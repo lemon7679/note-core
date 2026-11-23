@@ -86,6 +86,29 @@ int main() {
   std::printf("precise eraser: %d moves over %zu strokes -> %.3f ms/move\n", moves, ed.page().strokeCount(),
               ms(e0, e1) / moves);
 
+  // 글씨 보정 on every stroke of the page, and line straightening.
+  std::vector<StrokeId> all;
+  for (const StrokePtr& sp : ed.page().layers()[0].strokes()) all.push_back(sp->id);
+  CorrectionParams cp;
+  cp.strength = 0.6f;
+  auto c0 = Clock::now();
+  ed.correct(all, cp);
+  auto c1 = Clock::now();
+  ed.straighten(all);
+  auto c2 = Clock::now();
+  std::printf("correct %zu strokes: %.3f ms (%.1f us/stroke) | straighten: %.2f ms\n", all.size(), ms(c0, c1),
+              ms(c0, c1) * 1000.0 / static_cast<double>(all.size()), ms(c1, c2));
+
+  // Shape recognition at the moment of the hold.
+  auto loop = synth::synthesize(synth::ellipse({100, 100}, 60, 50, 0.04f, 1), o);
+  std::vector<Vec2> path;
+  for (const InputPoint& q : loop) path.push_back(q.pos);
+  auto r0s = Clock::now();
+  int found = 0;
+  for (int r = 0; r < 200; ++r) found += recognizeShape(path).type != ShapeType::None;
+  auto r1s = Clock::now();
+  std::printf("shape recognition: %.3f ms per hold (%d/200 found)\n", ms(r0s, r1s) / 200.0, found);
+
   Bitmap bmp(1190, 1684);
   auto r0 = Clock::now();
   Rasterizer::renderPage(ed.page(), bmp, Affine::scale(2.0f));

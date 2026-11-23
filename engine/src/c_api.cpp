@@ -21,6 +21,8 @@ static_assert(sizeof(InkStamp) == sizeof(StampPrim), "InkStamp layout");
 static_assert(offsetof(InkCapsule, x1) == offsetof(CapsulePrim, p1), "InkCapsule layout");
 static_assert(offsetof(InkNib, dir_x) == offsetof(NibPrim, dir), "InkNib layout");
 static_assert(offsetof(InkStamp, r_major) == offsetof(StampPrim, rMajor), "InkStamp layout");
+static_assert(static_cast<int>(INK_SHAPE_ARC) == static_cast<int>(ShapeType::Arc), "InkShape values");
+static_assert(static_cast<int>(INK_SHAPE_POLYGON) == static_cast<int>(ShapeType::Polygon), "InkShape values");
 
 struct InkBuilder {
   Brush brush;
@@ -207,6 +209,28 @@ void ink_builder_set_view_scale(InkBuilder* b, float s) {
   if (b) b->builder.setViewScale(s);
 }
 
+void ink_builder_set_correction(InkBuilder* b, float strength) {
+  if (!b) return;
+  b->brush.dynamics.correction.strength = clamp01(strength);
+  applyBrush(b);
+}
+
+void ink_builder_set_correction_options(InkBuilder* b, bool live, bool smooth, bool straighten, bool snapAxes) {
+  if (!b) return;
+  CorrectionParams& c = b->brush.dynamics.correction;
+  c.liveStabilization = live;
+  c.smoothCurves = smooth;
+  c.straightenLines = straighten;
+  c.snapToAxes = snapAxes;
+  applyBrush(b);
+}
+
+void ink_builder_set_shape_constraint(InkBuilder* b, bool constrained) {
+  if (b) b->builder.setShapeConstraint(constrained);
+}
+
+bool ink_builder_shape_is_regular(const InkBuilder* b) { return b && b->builder.snapped() && b->builder.shape().regular; }
+
 void ink_builder_begin(InkBuilder* b, const InkInputPoint* p) {
   if (b && p) b->builder.begin(toInput(*p));
 }
@@ -351,6 +375,22 @@ bool ink_editor_delete(InkEditor* e, const InkStrokeId* ids, size_t count) {
   if (!e || !ids) return false;
   e->touched();
   return e->editor.remove(std::vector<StrokeId>(ids, ids + count));
+}
+
+bool ink_editor_correct(InkEditor* e, const InkStrokeId* ids, size_t count, float strength) {
+  if (!e || !ids) return false;
+  CorrectionParams p;
+  p.strength = clamp01(strength);
+  e->touched();
+  return e->editor.correct(std::vector<StrokeId>(ids, ids + count), p);
+}
+
+bool ink_editor_straighten(InkEditor* e, const InkStrokeId* ids, size_t count, float strength) {
+  if (!e || !ids) return false;
+  StraightenParams p;
+  p.strength = clamp01(strength);
+  e->touched();
+  return e->editor.straighten(std::vector<StrokeId>(ids, ids + count), p);
 }
 
 InkRect ink_editor_take_dirty(InkEditor* e) { return e ? toC(e->editor.takeDirty()) : InkRect{0, 0, 0, 0}; }

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "ink/correction.h"
 #include "ink/eraser.h"
 #include "ink/history.h"
 #include "ink/page.h"
@@ -50,6 +51,12 @@ class PageEditor {
   bool remove(const std::vector<StrokeId>& ids);
   std::vector<StrokeId> duplicate(const std::vector<StrokeId>& ids, Vec2 offset);
   void clearLayer();
+
+  // --- 글씨 보정 on existing strokes (one undo step each) ---
+  /// Tidies the strokes (smoothing, straight segments, exact ㅡ/ㅣ).
+  bool correct(const std::vector<StrokeId>& ids, const CorrectionParams& params, float unitsPerViewPoint = 1.0f);
+  /// Straightens written lines: removes slant, levels drifting words.
+  bool straighten(const std::vector<StrokeId>& ids, const StraightenParams& params = {});
 
   bool canUndo() const { return history_.canUndo(); }
   bool canRedo() const { return history_.canRedo(); }

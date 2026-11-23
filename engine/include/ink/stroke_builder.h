@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "ink/brush.h"
+#include "ink/correction.h"
 #include "ink/filters.h"
 #include "ink/geometry.h"
 #include "ink/input.h"
@@ -74,8 +75,15 @@ class StrokeBuilder {
   bool updateEstimatedProperties(uint64_t updateId, float pressure, float altitude, float azimuth);
 
   /// Advances time-based logic (draw-and-hold shape snapping). Call once per
-  /// display frame while the pen is down. Returns true when the stroke snapped.
+  /// display frame while the pen is down. Returns true when the stroke snapped
+  /// (a good moment for a light haptic tap).
   bool tick(double now);
+
+  /// Constraint for a snapped shape (e.g. while a second finger touches the
+  /// screen): ellipse -> circle, rectangle -> square, triangle -> equilateral,
+  /// polygon -> regular, line -> 15° steps. Can be toggled at any time.
+  void setShapeConstraint(bool constrained);
+  bool shapeConstraint() const { return shapeConstraint_; }
 
   void end();
   void end(const InputPoint& last);
@@ -85,6 +93,10 @@ class StrokeBuilder {
   bool finished() const { return finished_; }
   bool snapped() const { return snappedShape_ != ShapeType::None; }
   ShapeType snappedShape() const { return snappedShape_; }
+  /// The snapped shape as currently shown (after drag-resize / constraint).
+  const RecognizedShape& shape() const { return currentShape_; }
+  /// What 글씨 보정 changed when the pen lifted (empty if it was off).
+  const CorrectionReport& correctionReport() const { return correctionReport_; }
 
   const std::vector<StrokePoint>& points() const { return points_; }
   const std::vector<StrokePoint>& predicted() const { return predicted_; }
@@ -131,7 +143,8 @@ class StrokeBuilder {
   void removeHooks();
   void finalizeTapers();
   bool trySnap();
-  void updateSnappedLine(Vec2 pos);
+  void updateSnappedShape(Vec2 pen);
+  void applyCorrection();
   void buildPrediction();
   void invalidateGeometry() { geomValid_ = false; }
 
@@ -164,6 +177,14 @@ class StrokeBuilder {
   Vec2 holdAnchor_;
   double holdAnchorTime_ = 0.0;
   ShapeType snappedShape_ = ShapeType::None;
+  RecognizedShape baseShape_;     ///< As recognized (auto-regularized).
+  RecognizedShape currentShape_;  ///< After drag / constraint.
+  Vec2 snapPen_;                  ///< Pen position when the shape snapped.
+  Vec2 lastPen_;                  ///< Latest filtered pen position.
+  StrokePoint snapTemplate_;
+  bool shapeConstraint_ = false;
+
+  CorrectionReport correctionReport_;
 
   // Incremental geometry.
   bool geomValid_ = false;

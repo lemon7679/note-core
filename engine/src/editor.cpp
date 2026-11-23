@@ -107,6 +107,14 @@ void PageEditor::clearLayer() {
   record(deleteStrokes(page_, activeLayer_, ids), "Clear");
 }
 
+bool PageEditor::correct(const std::vector<StrokeId>& ids, const CorrectionParams& params, float unitsPerViewPoint) {
+  return record(correctStrokes(page_, activeLayer_, ids, params, unitsPerViewPoint), "Correct Handwriting");
+}
+
+bool PageEditor::straighten(const std::vector<StrokeId>& ids, const StraightenParams& params) {
+  return record(straightenHandwriting(page_, activeLayer_, ids, params), "Straighten Lines");
+}
+
 bool PageEditor::undo() {
   if (erasing_) endErase();
   Rect r;

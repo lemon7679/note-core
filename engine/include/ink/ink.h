@@ -3,6 +3,7 @@
 
 #include "ink/brush.h"
 #include "ink/color.h"
+#include "ink/correction.h"
 #include "ink/editor.h"
 #include "ink/eraser.h"
 #include "ink/filters.h"

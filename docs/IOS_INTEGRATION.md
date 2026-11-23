@@ -133,6 +133,38 @@ final class InkCanvasView: UIView {
   `set_opacity`, `set_stabilizer`, `set_pressure_curve` 등으로 사용자 설정을 덧입힙니다.
 - ProMotion 기기에서는 `CADisplayLink.preferredFrameRateRange`를 120 Hz로 설정하세요.
 
+### 도형 그리기와 글씨 보정 연결
+
+```swift
+// 펜 설정 화면의 "글씨 보정" 슬라이더 (0 = 끔).
+ink_builder_set_correction(builder, Float(correctionSlider.value))
+// 세부 항목: 실시간 손떨림 보정, 곡선 다듬기, 직선 펴기, 수평·수직 맞춤
+ink_builder_set_correction_options(builder, true, true, true, true)
+
+// 그리고 멈추기: 기본 켜짐(볼펜·만년필·형광펜·마커). 펜별로 끄려면:
+ink_builder_set_snap_on_hold(builder, false)
+
+// 스냅 후 두 번째 손가락을 대면 완벽한 도형(원·정사각형·정삼각형·정다각형·15° 직선).
+override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    if ink_builder_is_active(builder), touches.contains(where: { $0.type == .direct }) {
+        ink_builder_set_shape_constraint(builder, true)
+        return
+    }
+    // ... 기존 처리
+}
+// 손가락을 떼면 ink_builder_set_shape_constraint(builder, false)
+```
+
+- 스냅 순간 `ink_builder_tick`이 `true`를 반환하므로 그때 가벼운 햅틱을 주면 좋습니다(1절 예제).
+- 스냅된 뒤에는 펜을 떼지 않고 움직이면 도형 크기·회전이 따라옵니다. 별도 처리는 필요 없습니다.
+- 올가미 메뉴에 "줄 정렬"과 "글씨 다듬기"를 두고 다음을 호출합니다.
+
+```swift
+ink_editor_straighten(editor, selectedIds, selectedIds.count, 1.0)   // 줄 기울기·단어 높이 정렬
+ink_editor_correct(editor, selectedIds, selectedIds.count, 0.6)      // 이미 쓴 글씨 다듬기
+// 둘 다 실행 취소 1단계로 기록되고, ink_editor_take_dirty에 변경 영역이 잡힙니다.
+```
+
 ## 2. 렌더링
 
 ### 빠른 시작 (CPU)
