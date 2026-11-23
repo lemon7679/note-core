@@ -30,7 +30,7 @@ let package = Package(
                 "tools",
             ],
             sources: ["src"],
-            publicHeadersDirectory: "include",
+            publicHeadersPath: "include",
             cxxSettings: [
                 .headerSearchPath("include"),
                 .define("NDEBUG", .when(configuration: .release)),
