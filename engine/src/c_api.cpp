@@ -16,8 +16,13 @@
 #include "ink/serialization.h"
 #include "ink/stroke_builder.h"
 #include "ink/svg_export.h"
+#include "c_api_internal.h"
+#include "ink/ink_gpu.h"
 
 using namespace ink;
+using ink::capi::GeometryCache;
+using ink::capi::SnapshotData;
+using ink::capi::ppuBucket;
 
 // The C structs are views onto the engine's primitive arrays: layouts must match.
 static_assert(sizeof(InkCapsule) == sizeof(CapsulePrim), "InkCapsule layout");
@@ -32,84 +37,6 @@ static_assert(static_cast<int>(INK_SHAPE_POLYGON) == static_cast<int>(ShapeType:
 struct InkBuilder {
   Brush brush;
   StrokeBuilder builder;
-};
-
-/// Tessellated geometry shared by an editor and its snapshots. Thread-safe:
-/// tile renderers on worker threads look strokes up while the main thread edits.
-/// Two zoom buckets per stroke (e.g. screen tiles and a small preview) so
-/// rendering both does not keep re-tessellating.
-struct GeometryCache {
-  struct Entry {
-    StrokePtr stroke;
-    float bucket = 0.0f;
-    std::shared_ptr<const StrokeGeometry> geom;
-    uint64_t used = 0;
-  };
-  std::mutex mutex;
-  std::unordered_map<StrokeId, std::array<Entry, 2>> entries;
-  uint64_t clock = 0;
-
-  std::shared_ptr<const StrokeGeometry> get(const StrokePtr& s, float bucket) {
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      auto it = entries.find(s->id);
-      if (it != entries.end())
-        for (Entry& e : it->second)
-          if (e.stroke == s && e.bucket == bucket) {
-            e.used = ++clock;
-            return e.geom;
-          }
-    }
-    // Tessellate outside the lock; strokes are immutable.
-    auto g = std::make_shared<StrokeGeometry>();
-    TessellationOptions opts;
-    opts.pixelsPerUnit = bucket;
-    Tessellator::tessellate(*s, opts, *g);
-    std::lock_guard<std::mutex> lock(mutex);
-    std::array<Entry, 2>& slots = entries[s->id];
-    Entry* victim = nullptr;
-    for (Entry& e : slots) {
-      if (e.stroke == s && e.bucket == bucket) return e.geom;  // another thread was faster
-      if (!victim && e.stroke != s) victim = &e;              // empty or an old version
-    }
-    if (!victim) victim = slots[0].used <= slots[1].used ? &slots[0] : &slots[1];
-    victim->stroke = s;
-    victim->bucket = bucket;
-    victim->geom = g;
-    victim->used = ++clock;
-    return g;
-  }
-
-  /// Drops entries of strokes no longer in the page (or replaced by an edit).
-  void prune(const std::unordered_map<StrokeId, StrokePtr>& live) {
-    std::lock_guard<std::mutex> lock(mutex);
-    for (auto it = entries.begin(); it != entries.end();) {
-      auto f = live.find(it->first);
-      bool keep = false;
-      if (f != live.end())
-        for (Entry& e : it->second) {
-          if (e.stroke && e.stroke != f->second) e = Entry{};
-          keep = keep || e.stroke != nullptr;
-        }
-      it = keep ? std::next(it) : entries.erase(it);
-    }
-  }
-
-  void clear() {
-    std::lock_guard<std::mutex> lock(mutex);
-    entries.clear();
-  }
-};
-
-/// Immutable state of a page for rendering / saving off the editor's thread.
-struct SnapshotData {
-  Page page;
-  std::unordered_set<StrokeId> hidden;
-  std::shared_ptr<GeometryCache> cache;
-};
-
-struct InkSnapshot {
-  std::shared_ptr<const SnapshotData> data;
 };
 
 struct InkEditor {
@@ -211,12 +138,6 @@ BrushKind kindFromC(InkBrushKind k) {
   return static_cast<BrushKind>(v);
 }
 
-float ppuBucket(float ppu) {
-  // Re-tessellate only when zoom crosses a power of two: geometry tessellated
-  // for a finer level is reused (slightly denser than needed, never coarser).
-  ppu = clamp(ppu, 0.125f, 128.0f);
-  return std::exp2(std::ceil(std::log2(ppu)));
-}
 
 void applyBrush(InkBuilder* b) { b->builder.setBrush(b->brush); }
 
@@ -733,6 +654,50 @@ char* ink_editor_export_svg(const InkEditor* e) {
   std::memcpy(p, svg.c_str(), svg.size() + 1);
   return p;
 }
+
+// ---------------------------------------------------------------- live frames (GPU module)
+
+InkLiveFrame* ink_builder_capture_live(const InkBuilder* b, const InkRect* region) {
+  if (!b) return nullptr;
+  const LiveGeometry& live = b->builder.lastGeometry();
+  if (!live.stable || !live.tail) return nullptr;
+  if (live.stable->empty() && live.tail->empty()) return nullptr;
+  InkLiveFrame* f = new (std::nothrow) InkLiveFrame();
+  if (!f) return nullptr;
+  f->style = b->builder.brush().style;
+  if (!region) {
+    f->geometry.append(*live.stable);
+    f->geometry.append(*live.tail);
+    return f;
+  }
+  f->region = fromC(*region);
+  // Primitives touching the region (with room for anti-aliasing and thin-line growth).
+  const Rect r = f->region.inflated(1.0f);
+  for (const StrokeGeometry* g : {live.stable, live.tail}) {
+    for (const CapsulePrim& c : g->capsules) {
+      Rect pb;
+      pb.expand(c.p0, c.r0);
+      pb.expand(c.p1, c.r1);
+      if (pb.intersects(r)) { f->geometry.capsules.push_back(c); f->geometry.bounds.expand(pb); }
+    }
+    for (const NibPrim& n : g->nibs) {
+      Rect pb;
+      pb.expand(n.p0, n.h0 + n.round);
+      pb.expand(n.p1, n.h1 + n.round);
+      if (pb.intersects(r)) { f->geometry.nibs.push_back(n); f->geometry.bounds.expand(pb); }
+    }
+    for (const StampPrim& p : g->stamps) {
+      Rect pb;
+      pb.expand(p.center, p.rMajor);
+      if (pb.intersects(r)) { f->geometry.stamps.push_back(p); f->geometry.bounds.expand(pb); }
+    }
+  }
+  return f;
+}
+
+void ink_live_frame_release(InkLiveFrame* f) { delete f; }
+
+bool ink_live_frame_multiply(const InkLiveFrame* f) { return f && f->style.blend == BlendMode::Multiply; }
 
 // ---------------------------------------------------------------- snapshots
 

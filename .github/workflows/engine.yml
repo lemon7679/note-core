@@ -1,0 +1,25 @@
+name: Engine
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Engine tests (CPU + GPU on Mesa llvmpipe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Headless OpenGL ES 3 (Mesa)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri
+      - name: Build
+        run: |
+          cmake -S engine -B build -DCMAKE_BUILD_TYPE=Release -DINK_BUILD_GPU=ON
+          cmake --build build -j 4
+      - name: CPU rasterizer, editing, file format
+        run: ./build/ink_tests
+      - name: GPU renderer against the CPU reference
+        run: ./build/ink_gpu_tests

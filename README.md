@@ -22,6 +22,7 @@ Android·Windows·macOS·Web(WASM)에서도 같은 코드로 같은 필기감을
 | 렌더링 | **SDF 캡슐/닙 프리미티브** + 획 단위 MAX 커버리지 합성, 행 단위 스팬 래스터화(내부는 바로 채우고 가장자리만 SDF) | 어떤 배율에서도 완벽한 안티앨리어싱, 겹침 얼룩 없음, 비용은 잉크 면적에 비례 |
 | 연필 | 페이지 좌표에 고정된 둥근 종이 결 + **흑연 밀도 누적**(Beer–Lambert) + 필압 깊이 반응 + 틸트 음영 | 부드럽고 몽글몽글한 흑연 질감, 지나간 자리에 자연스럽게 진해짐, 교차 해칭 시 결이 일치 |
 | 형광펜 | 치즐 닙 + Multiply + 획 단위 격리 합성 | 글씨는 그대로 검고, 한 획 안의 겹침은 진해지지 않음 |
+| GPU | OpenGL ES 3.0 렌더러(선택 모듈): 같은 SDF를 셰이더로, 획 단위 커버리지/흑연 밀도를 R16F에 쌓아 한 번 합성 | CPU 기준과 8비트 3단계 이내로 같은 결과, 타일 렌더링과 저지연 프론트 버퍼에 사용 |
 
 ## 펜 종류
 
@@ -101,10 +102,12 @@ Android·Windows·macOS·Web(WASM)에서도 같은 코드로 같은 필기감을
 engine/
   include/ink/        C++ 헤더 (ink.h = 전체 포함)
   include/ink/ink_c.h C API (Swift / Kotlin / C# / Dart / WASM 바인딩용)
+  include/ink/ink_gpu.h GPU 렌더러 C API (OpenGL ES 3, INK_BUILD_GPU)
   include/module.modulemap   Swift에서 `import InkEngine`
   src/                구현
+  gpu/                OpenGL ES 3 렌더러 + 헤드리스 EGL 컨텍스트 (Android에서 사용)
   shaders/ink_stroke.metal   iPad용 Metal 셰이더 (레퍼런스)
-  tests/              단위 테스트 79개
+  tests/              단위 테스트 79개 + GPU 테스트 5개
   tools/              데모(PNG 생성), 벤치마크(입력·타일 렌더링), 합성 입력 생성기
 docs/
   ARCHITECTURE.md     엔진 설계와 튜닝 포인트
@@ -120,6 +123,10 @@ cmake --build build
 ./build/ink_demo out       # 샘플 이미지 생성 → out/*.png, out/fountain.svg
 ./build/ink_bench          # 성능 측정 (입력, 지우개, 보정)
 ./build/ink_render_bench   # 타일 렌더링 (형광펜이 많은 페이지의 확대·지우개)
+
+# GPU 렌더러 (EGL + GLES 3 필요, Linux에서는 Mesa: libegl-dev libgles-dev libegl-mesa0)
+cmake -S engine -B build-gpu -DINK_BUILD_GPU=ON && cmake --build build-gpu
+./build-gpu/ink_gpu_tests  # GPU 결과를 CPU 기준과 픽셀 비교 (INK_GPU_DUMP=폴더 로 PNG 저장)
 ```
 
 Swift Package (iPad 앱 `note-ipad`가 사용하는 방식, xtool/WSL·Xcode 공통):
