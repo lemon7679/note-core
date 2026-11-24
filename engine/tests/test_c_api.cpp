@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "ink/ink_c.h"
@@ -341,6 +343,128 @@ TEST(c_api_hidden_and_selected_rendering) {
   std::fill(px.begin(), px.end(), 0);
   ink_editor_render_over_rgba(e, px.data(), w, h, w * 4, 1.0f, 0, 0);
   CHECK(inkedRows(px, 0, 50) > 50);
+  ink_builder_destroy(b);
+  ink_editor_destroy(e);
+}
+
+TEST(c_api_erase_damage_repaint_matches_full_render) {
+  // Repainting only the reported damage after each erase move must give the
+  // same pixels as rendering the final page from scratch.
+  InkEditor* e = ink_editor_create(300, 160);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_HIGHLIGHTER);
+  REQUIRE(e && b);
+  for (int k = 0; k < 3; ++k) {
+    std::vector<InkInputPoint> pts;
+    for (int i = 0; i <= 60; ++i) {
+      InkInputPoint p{};
+      p.x = 20.0f + i * 4.3f;
+      p.y = 40.0f + k * 30.0f + 6.0f * std::sin(i * 0.15f + k);
+      p.pressure = 0.5f;
+      p.altitude = 1.2f;
+      p.time = i / 120.0;
+      pts.push_back(p);
+    }
+    ink_builder_set_brush(b, k == 1 ? INK_BRUSH_FOUNTAIN_PEN : INK_BRUSH_HIGHLIGHTER, InkColor{0.9f, 0.6f, 0.1f, 1}, k == 1 ? 2.0f : 12.0f);
+    ink_builder_begin(b, &pts[0]);
+    ink_builder_add_points(b, pts.data() + 1, pts.size() - 1);
+    ink_builder_end(b);
+    REQUIRE(ink_editor_commit(e, b) != 0);
+  }
+  const int w = 600, h = 320;
+  const float scale = 2.0f;
+  std::vector<uint8_t> live(w * h * 4, 255);
+  ink_editor_render_over_rgba(e, live.data(), w, h, w * 4, scale, 0, 0);
+  ink_editor_take_dirty(e);
+  ink_editor_erase_begin(e, INK_ERASER_PRECISE, 5.0f, 0, 150, 20);
+  for (int i = 1; i <= 40; ++i) {
+    ink_editor_erase_move(e, 150.0f + std::sin(i * 0.3f) * 20.0f, 20.0f + i * 3.0f);
+    InkRect d = ink_editor_take_dirty(e);
+    if (d.width <= 0) continue;
+    int x0 = std::max(0, static_cast<int>(std::floor(d.x * scale)) - 1);
+    int y0 = std::max(0, static_cast<int>(std::floor(d.y * scale)) - 1);
+    int x1 = std::min(w, static_cast<int>(std::ceil((d.x + d.width) * scale)) + 1);
+    int y1 = std::min(h, static_cast<int>(std::ceil((d.y + d.height) * scale)) + 1);
+    if (x0 >= x1 || y0 >= y1) continue;
+    // Repaint the damaged rectangle: background, then ink, like a tile renderer.
+    const int pw = x1 - x0, ph = y1 - y0;
+    std::vector<uint8_t> part(pw * ph * 4, 255);
+    ink_editor_render_over_rgba(e, part.data(), pw, ph, pw * 4, scale, -x0, -y0);
+    for (int y = 0; y < ph; ++y) std::memcpy(&live[((y0 + y) * w + x0) * 4], &part[y * pw * 4], pw * 4);
+  }
+  ink_editor_erase_end(e);
+  std::vector<uint8_t> full(w * h * 4, 255);
+  ink_editor_render_over_rgba(e, full.data(), w, h, w * 4, scale, 0, 0);
+  int maxDiff = 0;
+  for (size_t i = 0; i < full.size(); ++i) maxDiff = std::max(maxDiff, std::abs(full[i] - live[i]));
+  CHECK(maxDiff <= 2);
+  ink_builder_destroy(b);
+  ink_editor_destroy(e);
+}
+
+TEST(c_api_snapshots_render_and_save_off_thread) {
+  InkEditor* e = ink_editor_create(300, 200);
+  InkBuilder* b = ink_builder_create(INK_BRUSH_HIGHLIGHTER);
+  REQUIRE(e && b);
+  auto line = [&](InkBrushKind kind, float y) {
+    ink_builder_set_brush(b, kind, InkColor{0.2f, 0.4f, 0.9f, 1}, kind == INK_BRUSH_HIGHLIGHTER ? 12.0f : 2.0f);
+    std::vector<InkInputPoint> pts;
+    for (int i = 0; i <= 50; ++i) {
+      InkInputPoint p{};
+      p.x = 20.0f + i * 5.0f;
+      p.y = y + 4.0f * std::sin(i * 0.2f);
+      p.pressure = 0.5f;
+      p.altitude = 1.2f;
+      p.time = i / 120.0;
+      pts.push_back(p);
+    }
+    ink_builder_begin(b, &pts[0]);
+    ink_builder_add_points(b, pts.data() + 1, pts.size() - 1);
+    ink_builder_end(b);
+    return ink_editor_commit(e, b);
+  };
+  line(INK_BRUSH_HIGHLIGHTER, 50);
+  line(INK_BRUSH_PENCIL, 90);
+  line(INK_BRUSH_BALLPOINT, 130);
+
+  InkSnapshot* snap = ink_editor_snapshot(e);
+  REQUIRE(snap != nullptr);
+  CHECK(ink_snapshot_stroke_count(snap) == 3);
+  const int w = 300, h = 200;
+  std::vector<uint8_t> ref(w * h * 4, 255);
+  ink_editor_render_over_rgba(e, ref.data(), w, h, w * 4, 1.0f, 0, 0);
+  size_t editorSize = 0, snapSize = 0;
+  uint8_t* a = ink_editor_save(e, &editorSize);
+  uint8_t* sb = ink_snapshot_save(snap, &snapSize);
+  REQUIRE(a && sb);
+  CHECK(editorSize == snapSize && std::memcmp(a, sb, editorSize) == 0);
+  ink_free(a);
+  ink_free(sb);
+
+  // Worker threads render the snapshot while the main thread keeps editing.
+  std::vector<std::vector<uint8_t>> out(4, std::vector<uint8_t>(w * h * 4, 255));
+  std::vector<std::thread> workers;
+  for (int k = 0; k < 4; ++k)
+    workers.emplace_back([&, k] {
+      for (int rep = 0; rep < 5; ++rep) {
+        std::fill(out[k].begin(), out[k].end(), 255);
+        ink_snapshot_render_over_rgba(snap, out[k].data(), w, h, w * 4, 1.0f, 0, 0);
+      }
+    });
+  for (int k = 0; k < 6; ++k) line(INK_BRUSH_FOUNTAIN_PEN, 20.0f + k * 30.0f);
+  ink_editor_erase_begin(e, INK_ERASER_STROKE, 8.0f, 0, 100, 0);
+  ink_editor_erase_move(e, 100, 200);
+  ink_editor_erase_end(e);
+  std::vector<uint8_t> scratch(w * h * 4, 255);
+  ink_editor_render_over_rgba(e, scratch.data(), w, h, w * 4, 2.0f, 0, 0);  // other zoom bucket, same cache
+  for (std::thread& t : workers) t.join();
+  for (int k = 0; k < 4; ++k) CHECK(out[k] == ref);  // the snapshot is unaffected by later edits
+  CHECK(ink_snapshot_stroke_count(snap) == 3);
+  ink_snapshot_release(snap);
+
+  // A fresh snapshot sees the edits; hidden strokes are skipped.
+  InkSnapshot* now = ink_editor_snapshot(e);
+  CHECK(ink_snapshot_stroke_count(now) == ink_editor_stroke_count(e));
+  ink_snapshot_release(now);
   ink_builder_destroy(b);
   ink_editor_destroy(e);
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(InkEngine VERSION 0.1.0 LANGUAGES CXX)
+project(InkEngine VERSION 0.2.0 LANGUAGES CXX)
 
 option(INK_BUILD_TESTS "Build InkEngine unit tests" ON)
 option(INK_BUILD_TOOLS "Build InkEngine demo / tools" ON)
@@ -58,7 +58,8 @@ if(INK_BUILD_TESTS)
     tests/test_shapes_correction.cpp
     tools/synth_input.cpp
   )
-  target_link_libraries(ink_tests PRIVATE inkengine)
+  find_package(Threads REQUIRED)
+  target_link_libraries(ink_tests PRIVATE inkengine Threads::Threads)
   add_test(NAME ink_tests COMMAND ink_tests)
 endif()
 
@@ -67,6 +68,8 @@ if(INK_BUILD_TOOLS)
   target_link_libraries(ink_demo PRIVATE inkengine)
   add_executable(ink_bench tools/ink_bench.cpp tools/synth_input.cpp)
   target_link_libraries(ink_bench PRIVATE inkengine)
+  add_executable(ink_render_bench tools/ink_render_bench.cpp tools/synth_input.cpp)
+  target_link_libraries(ink_render_bench PRIVATE inkengine)
 endif()
 
 install(TARGETS inkengine EXPORT InkEngineTargets ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)

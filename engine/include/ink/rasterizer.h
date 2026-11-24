@@ -39,6 +39,15 @@ class Bitmap {
   std::vector<float> px_;
 };
 
+/// Caller-owned premultiplied RGBA8 pixels (RGBA byte order), e.g. a locked
+/// platform bitmap. Strokes composite into it directly, touching only the
+/// pixels they cover.
+struct PixelBufferRGBA8 {
+  uint8_t* data = nullptr;
+  int width = 0, height = 0;
+  size_t stride = 0;  ///< Bytes per row.
+};
+
 struct RenderOptions {
   Color background = colors::kWhite;
   bool drawBackground = true;
@@ -51,9 +60,13 @@ struct RenderOptions {
 /// Reference software renderer. Used for export, thumbnails, tests and as the
 /// specification the GPU renderer is validated against.
 ///
-/// Per stroke: primitives are rasterized into a coverage mask with MAX
-/// blending (so the stroke's own overlaps never double up), then the mask is
-/// composited once with the stroke's color, opacity and blend mode.
+/// Per stroke: vector primitives are rasterized into a coverage mask with MAX
+/// blending (so the stroke's own overlaps never double up); pencil stamps
+/// accumulate graphite density instead (soft edges, tone builds up where the
+/// lead passes again). The mask is then composited once with the stroke's
+/// color, opacity and blend mode. Primitives are rasterized row by row over
+/// their exact extent: interiors are filled directly and only the
+/// anti-aliased fringe evaluates the SDF, so cost follows the inked area.
 class Rasterizer {
  public:
   /// Renders all visible layers of the page. `pageToPixel` maps page units to bitmap pixels.
@@ -64,6 +77,10 @@ class Rasterizer {
   /// Composites already-tessellated page-space geometry (e.g. a live stroke).
   static void renderGeometry(const StrokeGeometry& pageGeometry, const StrokeStyle& style, Bitmap& target,
                              const Affine& pageToPixel, const RenderOptions& opts = {});
+  /// Same as renderGeometry, composited straight into 8-bit premultiplied pixels
+  /// (no float copy of the target; the app's tile renderers use this).
+  static void renderGeometryOver(const StrokeGeometry& pageGeometry, const StrokeStyle& style,
+                                 PixelBufferRGBA8& target, const Affine& pageToPixel, const RenderOptions& opts = {});
   /// Coverage mask only (no compositing), pixel-space geometry. `mask` is
   /// box.width*box.height floats for the integer pixel box [x0,x1)x[y0,y1).
   static void rasterizeCoverage(const StrokeGeometry& pixelGeometry, const StrokeStyle& style,

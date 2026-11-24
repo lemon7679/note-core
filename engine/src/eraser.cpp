@@ -1,5 +1,6 @@
 #include "ink/eraser.h"
 
+#include <algorithm>
 #include <memory>
 
 #include "ink/spline.h"
@@ -65,7 +66,10 @@ struct Cutter {
 };
 
 /// Splits `stroke` by the eraser. Returns false if the stroke is untouched.
-bool cutStroke(const Stroke& stroke, const Cutter& cut, std::vector<std::vector<StrokePoint>>& pieces) {
+/// `changed` receives the area where the pieces' curve can differ from the
+/// original's (control points near the cut, plus the spline's reach).
+bool cutStroke(const Stroke& stroke, const Cutter& cut, std::vector<std::vector<StrokePoint>>& pieces,
+               Rect& changed) {
   const std::vector<StrokePoint>& pts = stroke.points;
   const size_t n = pts.size();
   pieces.clear();
@@ -135,6 +139,19 @@ bool cutStroke(const Stroke& stroke, const Cutter& cut, std::vector<std::vector<
       continue;
     }
     touched = true;
+    // Catmull–Rom: a segment depends on four control points, so replacing the
+    // points of `seg` reshapes its neighbours too.
+    {
+      const size_t lo = seg >= 2 ? seg - 2 : 0, hi = std::min(n - 1, seg + 3);
+      Rect local;
+      float width = 0.0f;
+      for (size_t i = lo; i <= hi; ++i) {
+        local.expand(pts[i].pos);
+        width = std::max(width, pts[i].width);
+      }
+      // Half a width of ink, plus up to half a width of dropped crumbs.
+      changed.expand(local.inflated(width + 0.5f));
+    }
 
     bool prevIn = cut.inside(dense[0]);
     if (!prevIn && cur.empty()) cur.push_back(dense[0]);
@@ -198,6 +215,7 @@ ChangeSet eraseAlong(Page& page, LayerId layerId, Vec2 from, Vec2 to, const Eras
   long offset = 0;  // index shift in the post-edit layer caused by earlier replacements
   Cutter cutter{from, to, opts.radius, clamp01(opts.widthInfluence)};
   std::vector<std::vector<StrokePoint>> pieces;
+  Rect damage;
 
   for (size_t idx : candidates) {
     const StrokePtr& sp = layer->at(idx);
@@ -206,11 +224,13 @@ ChangeSet eraseAlong(Page& page, LayerId layerId, Vec2 from, Vec2 to, const Eras
     if (opts.mode == EraserMode::Stroke) {
       if (!strokeHitsSegment(*sp, from, to, opts.radius, 1.0f)) continue;
       lc.removed.emplace_back(idx, sp);
+      damage.expand(sp->bounds);
       offset -= 1;
       continue;
     }
 
-    if (!cutStroke(*sp, cutter, pieces)) continue;
+    Rect changed;
+    if (!cutStroke(*sp, cutter, pieces, changed)) continue;
     lc.removed.emplace_back(idx, sp);
     size_t base = static_cast<size_t>(static_cast<long>(idx) + offset);
     for (size_t k = 0; k < pieces.size(); ++k) {
@@ -222,10 +242,20 @@ ChangeSet eraseAlong(Page& page, LayerId layerId, Vec2 from, Vec2 to, const Eras
       piece->updateBounds();
       lc.added.emplace_back(base + k, std::move(piece));
     }
+    // Pieces look exactly like the original away from the cut, except pencil
+    // stamps (their walk restarts in each piece) and pieces that overlap each
+    // other (one stroke's coverage was MAX-combined; separate pieces stack).
+    bool local = sp->style.method == RenderMethod::Vector && !changed.isEmpty() && !pieces.empty();
+    const size_t first = lc.added.size() - pieces.size();
+    for (size_t a = first; local && a < lc.added.size(); ++a)
+      for (size_t b = a + 1; local && b < lc.added.size(); ++b)
+        if (lc.added[a].second->bounds.intersects(lc.added[b].second->bounds)) local = false;
+    damage.expand(local ? changed.intersection(sp->bounds.inflated(1.0f)) : sp->bounds);
     offset += static_cast<long>(pieces.size()) - 1;
   }
 
   if (lc.removed.empty()) return cs;
+  cs.damage = damage;
   cs.layers.push_back(std::move(lc));
   applyChange(page, cs);
   return cs;

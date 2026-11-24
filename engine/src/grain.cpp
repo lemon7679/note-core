@@ -1,30 +1,11 @@
 #include "ink/grain.h"
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 
 namespace ink {
 
-namespace {
-
-inline float quintic(float t) { return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); }
-
-/// Periodic value noise with (freqX, freqY) lattice cells across the tile.
-float valueNoise(float x, float y, int freqX, int freqY, uint32_t seed) {
-  float fx = x * freqX, fy = y * freqY;
-  int ix = static_cast<int>(std::floor(fx)), iy = static_cast<int>(std::floor(fy));
-  float tx = quintic(fx - ix), ty = quintic(fy - iy);
-  auto lattice = [&](int i, int j) {
-    i = ((i % freqX) + freqX) % freqX;
-    j = ((j % freqY) + freqY) % freqY;
-    return hashToUnit(hash32(seed, static_cast<uint32_t>(i * 7919 + j * 104729)));
-  };
-  float a = lattice(ix, iy), b = lattice(ix + 1, iy);
-  float c = lattice(ix, iy + 1), d = lattice(ix + 1, iy + 1);
-  return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
-}
-
-}  // namespace
 
 const GrainTexture& GrainTexture::shared() {
   static const GrainTexture instance(0x5EED1234u);
@@ -33,27 +14,39 @@ const GrainTexture& GrainTexture::shared() {
 
 GrainTexture::GrainTexture(uint32_t seed) {
   const int n = kSize;
-  std::vector<float> h(static_cast<size_t>(n) * n);
-  // Paper tooth is fine-grained: most energy at 1-4 texel features, a little
-  // mid-frequency "sizing" variation, and short fibres elongated along x.
-  // (Low frequencies must stay weak, or graphite looks blotchy/camouflaged.)
-  struct Octave { int freqX, freqY; float weight; };
-  const Octave octaves[] = {
-      {16, 16, 0.05f}, {64, 64, 0.22f}, {128, 128, 0.30f}, {256, 256, 0.25f}, {48, 192, 0.10f},
+  std::vector<float> h(static_cast<size_t>(n) * n, 0.0f);
+  // Paper tooth as a field of soft, round bumps (sparse Gaussian convolution
+  // noise): isotropic, no lattice squares, no per-texel white noise. Fine
+  // bumps give the velvety grain, a few broad ones a gentle "sizing" mottle,
+  // and faint elongated ones the fibres along x.
+  struct Layer { int count; float sigmaMin, sigmaMax, aspect, weight; };
+  const Layer layers[] = {
+      {7000, 0.9f, 1.7f, 1.0f, 1.00f},   // tooth
+      {700, 2.5f, 4.0f, 1.0f, 0.28f},    // clusters
+      {60, 10.0f, 16.0f, 1.0f, 0.16f},   // sizing
+      {300, 0.9f, 1.4f, 4.0f, 0.30f},    // fibres (stretched along x)
   };
-  for (int y = 0; y < n; ++y) {
-    for (int x = 0; x < n; ++x) {
-      float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(n);
-      float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(n);
-      float sum = 0.0f;
-      uint32_t o = 0;
-      for (const Octave& oc : octaves) {
-        sum += valueNoise(u, v, oc.freqX, oc.freqY, seed + o) * oc.weight;
-        ++o;
+  uint32_t k = 0;
+  for (const Layer& L : layers) {
+    for (int i = 0; i < L.count; ++i, ++k) {
+      const uint32_t h0 = hash32(seed, k * 4u + 1u);
+      const float cx = hashToUnit(h0) * n;
+      const float cy = hashToUnit(hash32(h0, 2u)) * n;
+      const float sigma = lerp(L.sigmaMin, L.sigmaMax, hashToUnit(hash32(h0, 3u)));
+      const float amp = L.weight * (0.5f + hashToUnit(hash32(h0, 4u)));
+      const float sx = sigma * L.aspect, sy = sigma;
+      const float ix = 1.0f / (2.0f * sx * sx), iy = 1.0f / (2.0f * sy * sy);
+      const int rx = static_cast<int>(std::ceil(3.0f * sx)), ry = static_cast<int>(std::ceil(3.0f * sy));
+      const int x0 = static_cast<int>(std::floor(cx)), y0 = static_cast<int>(std::floor(cy));
+      for (int dy = -ry; dy <= ry; ++dy) {
+        const float fy = static_cast<float>(y0 + dy) + 0.5f - cy;
+        const float gy = std::exp(-fy * fy * iy);
+        const size_t row = static_cast<size_t>(((y0 + dy) % n + n) % n) * n;
+        for (int dx = -rx; dx <= rx; ++dx) {
+          const float fx = static_cast<float>(x0 + dx) + 0.5f - cx;
+          h[row + static_cast<size_t>(((x0 + dx) % n + n) % n)] += amp * gy * std::exp(-fx * fx * ix);
+        }
       }
-      // Fine white tooth.
-      sum += 0.08f * hashToUnit(hash32(seed ^ 0xA5A5A5u, static_cast<uint32_t>(y * n + x)));
-      h[static_cast<size_t>(y) * n + x] = sum;
     }
   }
   // Histogram equalization -> uniform distribution in [0, 1].

@@ -299,3 +299,47 @@ TEST(svg_export_outlines) {
   CHECK(paths == 2);
   CHECK(svg.find("mix-blend-mode:multiply") != std::string::npos);
 }
+
+TEST(erase_gesture_history_is_the_net_change) {
+  PageEditor ed;
+  Brush hl = presets::highlighter();
+  ed.commitStroke(drawn(hl, synth::polyline({{20, 100}, {560, 100}}), 3));
+  ed.commitStroke(drawn(presets::ballpoint(), synth::polyline({{20, 130}, {560, 130}}), 4));
+  StrokePtr hlOriginal = ed.page().layers()[0].at(0);
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 4.0f;
+  // Scrub along the highlighter: it is cut again and again.
+  ed.beginErase(o, {100, 90});
+  for (int i = 0; i < 200; ++i) ed.eraseTo({100.0f + i * 2.0f, i % 2 ? 90.0f : 110.0f});
+  ed.endErase();
+  const size_t after = ed.page().layers()[0].size();
+  REQUIRE(after > 2);
+  // Undo restores exactly the original strokes; redo the final pieces.
+  std::vector<StrokePtr> finalStrokes = ed.page().layers()[0].strokes();
+  ed.undo();
+  REQUIRE(ed.page().layers()[0].size() == 2);
+  CHECK(ed.page().layers()[0].at(0) == hlOriginal);
+  ed.redo();
+  REQUIRE(ed.page().layers()[0].size() == after);
+  for (size_t i = 0; i < after; ++i) CHECK(ed.page().layers()[0].at(i) == finalStrokes[i]);
+}
+
+TEST(precise_erase_damage_is_local_for_vector_ink) {
+  PageEditor ed;
+  ed.commitStroke(drawn(presets::highlighter(), synth::polyline({{20, 100}, {560, 100}}), 5));
+  ed.commitStroke(drawn(presets::pencil(), synth::polyline({{20, 200}, {560, 200}}), 6));
+  ed.takeDirty();
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 5.0f;
+  ed.beginErase(o, {300, 80});
+  ed.eraseTo({300, 120});
+  Rect d = ed.takeDirty();
+  REQUIRE(!d.isEmpty());
+  CHECK(d.width() < 80.0f);  // the cut, not the 540 pt long highlighter
+  ed.eraseTo({300, 220});    // pencil: stamp walk restarts in each piece -> whole stroke
+  Rect d2 = ed.takeDirty();
+  CHECK(d2.width() > 500.0f);
+  ed.endErase();
+}

@@ -16,8 +16,13 @@ class History {
 
   /// Records an already-applied change.
   void push(ChangeSet change, const std::string& label = {});
-  void beginGroup(const std::string& label);
-  void endGroup();
+  /// Groups the following changes into one undo step. With `page`, the group
+  /// is stored as the net change between the page at beginGroup and at
+  /// endGroup: an eraser drag that cuts the same long stroke hundreds of times
+  /// keeps only "original strokes -> final pieces" instead of every
+  /// intermediate piece (memory stays proportional to what actually changed).
+  void beginGroup(const std::string& label, const Page* page = nullptr);
+  void endGroup(const Page* page = nullptr);
   bool grouping() const { return grouping_; }
 
   bool canUndo() const { return !undo_.empty(); }
@@ -44,6 +49,8 @@ class History {
   std::vector<Entry> redo_;
   bool grouping_ = false;
   Entry group_;
+  /// Stroke lists per layer when the group began (pointers only), for coalescing.
+  std::vector<std::pair<LayerId, std::vector<StrokePtr>>> groupStart_;
 };
 
 }  // namespace ink

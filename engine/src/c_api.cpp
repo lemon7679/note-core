@@ -3,6 +3,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstddef>
+#include <array>
+#include <iterator>
+#include <memory>
+#include <mutex>
 #include <new>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,44 +34,119 @@ struct InkBuilder {
   StrokeBuilder builder;
 };
 
+/// Tessellated geometry shared by an editor and its snapshots. Thread-safe:
+/// tile renderers on worker threads look strokes up while the main thread edits.
+/// Two zoom buckets per stroke (e.g. screen tiles and a small preview) so
+/// rendering both does not keep re-tessellating.
+struct GeometryCache {
+  struct Entry {
+    StrokePtr stroke;
+    float bucket = 0.0f;
+    std::shared_ptr<const StrokeGeometry> geom;
+    uint64_t used = 0;
+  };
+  std::mutex mutex;
+  std::unordered_map<StrokeId, std::array<Entry, 2>> entries;
+  uint64_t clock = 0;
+
+  std::shared_ptr<const StrokeGeometry> get(const StrokePtr& s, float bucket) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      auto it = entries.find(s->id);
+      if (it != entries.end())
+        for (Entry& e : it->second)
+          if (e.stroke == s && e.bucket == bucket) {
+            e.used = ++clock;
+            return e.geom;
+          }
+    }
+    // Tessellate outside the lock; strokes are immutable.
+    auto g = std::make_shared<StrokeGeometry>();
+    TessellationOptions opts;
+    opts.pixelsPerUnit = bucket;
+    Tessellator::tessellate(*s, opts, *g);
+    std::lock_guard<std::mutex> lock(mutex);
+    std::array<Entry, 2>& slots = entries[s->id];
+    Entry* victim = nullptr;
+    for (Entry& e : slots) {
+      if (e.stroke == s && e.bucket == bucket) return e.geom;  // another thread was faster
+      if (!victim && e.stroke != s) victim = &e;              // empty or an old version
+    }
+    if (!victim) victim = slots[0].used <= slots[1].used ? &slots[0] : &slots[1];
+    victim->stroke = s;
+    victim->bucket = bucket;
+    victim->geom = g;
+    victim->used = ++clock;
+    return g;
+  }
+
+  /// Drops entries of strokes no longer in the page (or replaced by an edit).
+  void prune(const std::unordered_map<StrokeId, StrokePtr>& live) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto it = entries.begin(); it != entries.end();) {
+      auto f = live.find(it->first);
+      bool keep = false;
+      if (f != live.end())
+        for (Entry& e : it->second) {
+          if (e.stroke && e.stroke != f->second) e = Entry{};
+          keep = keep || e.stroke != nullptr;
+        }
+      it = keep ? std::next(it) : entries.erase(it);
+    }
+  }
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(mutex);
+    entries.clear();
+  }
+};
+
+/// Immutable state of a page for rendering / saving off the editor's thread.
+struct SnapshotData {
+  Page page;
+  std::unordered_set<StrokeId> hidden;
+  std::shared_ptr<GeometryCache> cache;
+};
+
+struct InkSnapshot {
+  std::shared_ptr<const SnapshotData> data;
+};
+
 struct InkEditor {
   PageEditor editor;
-  struct Cached {
-    StrokePtr stroke;
-    float ppu = 0.0f;
-    StrokeGeometry geom;
-  };
-  std::unordered_map<StrokeId, Cached> cache;
+  std::shared_ptr<GeometryCache> cache = std::make_shared<GeometryCache>();
   std::unordered_map<StrokeId, StrokePtr> index;
   std::unordered_set<StrokeId> hidden;  // skipped by render_over (lasso drag preview)
+  std::shared_ptr<const StrokeGeometry> lastViewed;  // keeps ink_editor_stroke_geometry's view alive
+  std::shared_ptr<const SnapshotData> snapshot;      // current state, built on demand
   bool indexDirty = true;
 
   InkEditor(float w, float h) : editor(w, h) {}
-  void touched() { indexDirty = true; }
-  /// Tessellation of `s` at the zoom bucket of `ppu`, cached per stroke.
-  const StrokeGeometry& geometry(const StrokePtr& s, float bucket) {
-    Cached& c = cache[s->id];
-    if (c.stroke != s || c.ppu != bucket) {
-      c.stroke = s;
-      c.ppu = bucket;
-      c.geom.clear();
-      TessellationOptions opts;
-      opts.pixelsPerUnit = bucket;
-      Tessellator::tessellate(*s, opts, c.geom);
-    }
-    return c.geom;
+  void touched() {
+    indexDirty = true;
+    snapshot.reset();
   }
+  /// Tessellation of `s` at the zoom bucket of `ppu`, cached per stroke.
+  std::shared_ptr<const StrokeGeometry> geometry(const StrokePtr& s, float bucket) { return cache->get(s, bucket); }
   void rebuildIndex() {
     if (!indexDirty) return;
     index.clear();
     for (const Layer& l : editor.page().layers())
       for (const StrokePtr& s : l.strokes()) index[s->id] = s;
-    for (auto it = cache.begin(); it != cache.end();) {
-      auto f = index.find(it->first);
-      if (f == index.end() || f->second != it->second.stroke) it = cache.erase(it);
-      else ++it;
-    }
+    cache->prune(index);
     indexDirty = false;
+  }
+  /// O(strokes) pointer copies; shared until the next edit.
+  const std::shared_ptr<const SnapshotData>& currentSnapshot() {
+    if (!snapshot) {
+      rebuildIndex();
+      auto d = std::make_shared<SnapshotData>();
+      d->page = editor.page();
+      d->hidden = hidden;
+      d->cache = cache;
+      snapshot = std::move(d);
+    }
+    return snapshot;
   }
 };
 
@@ -123,6 +202,7 @@ void fillStyle(const StrokeStyle& s, InkStyleInfo* out) {
   out->grain_strength = s.grainStrength;
   out->grain_scale = s.grainScale;
   out->draw_behind = s.drawBehind;
+  out->stamp_spacing = s.spacing;
 }
 
 BrushKind kindFromC(InkBrushKind k) {
@@ -144,7 +224,7 @@ void applyBrush(InkBuilder* b) { b->builder.setBrush(b->brush); }
 
 extern "C" {
 
-const char* ink_version(void) { return "0.1.0"; }
+const char* ink_version(void) { return "0.2.0"; }
 
 void ink_free(void* p) { std::free(p); }
 
@@ -310,15 +390,10 @@ void ink_builder_render_over_rgba(const InkBuilder* b, uint8_t* pixels, int widt
   combined.append(*live.tail);
   if (combined.empty()) return;
   const Affine t = Affine::translate(offset_x, offset_y) * Affine::scale(scale);
-  // Skip the float conversion when the stroke misses this tile entirely.
-  const Rect px = t.apply(combined.bounds).inflated(2.0f);
-  if (px.maxX < 0.0f || px.maxY < 0.0f || px.minX > static_cast<float>(width) || px.minY > static_cast<float>(height))
-    return;
-  Bitmap bmp = Bitmap::fromPremultipliedRGBA8(pixels, width, height, stride);
+  PixelBufferRGBA8 target{pixels, width, height, stride};
   RenderOptions opts;
   opts.drawBackground = false;
-  Rasterizer::renderGeometry(combined, b->builder.brush().style, bmp, t, opts);
-  bmp.toPremultipliedRGBA8(pixels, stride);
+  Rasterizer::renderGeometryOver(combined, b->builder.brush().style, target, t, opts);
 }
 
 // ---------------------------------------------------------------- editor
@@ -368,7 +443,9 @@ void ink_editor_erase_end(InkEditor* e) {
 }
 
 uint32_t ink_editor_add_layer(InkEditor* e, const char* name) {
-  return e ? e->editor.addLayer(name ? name : "Layer") : 0;
+  if (!e) return 0;
+  e->touched();
+  return e->editor.addLayer(name ? name : "Layer");
 }
 bool ink_editor_set_active_layer(InkEditor* e, uint32_t id) { return e && e->editor.setActiveLayer(id); }
 uint32_t ink_editor_active_layer(const InkEditor* e) { return e ? e->editor.activeLayer() : 0; }
@@ -380,6 +457,7 @@ bool ink_editor_set_layer_visible(InkEditor* e, uint32_t id, bool visible) {
   if (l->visible != visible) {
     l->visible = visible;
     e->editor.markDirty(l->contentBounds());
+    e->touched();
   }
   return true;
 }
@@ -456,7 +534,8 @@ bool ink_editor_stroke_geometry(InkEditor* e, InkStrokeId id, float ppu, InkGeom
   e->rebuildIndex();
   auto it = e->index.find(id);
   if (it == e->index.end()) return false;
-  *out = view(e->geometry(it->second, ppuBucket(ppu)));
+  e->lastViewed = e->geometry(it->second, ppuBucket(ppu));
+  *out = view(*e->lastViewed);
   if (style) fillStyle(it->second->style, style);
   return true;
 }
@@ -480,13 +559,15 @@ void ink_editor_render_rgba(InkEditor* e, uint8_t* pixels, int width, int height
 }  // extern "C"
 
 namespace {
-// Composites strokes accepted by `want` over premultiplied pixels, honouring
-// layer visibility/opacity and the draw-behind pass like Rasterizer::renderPage.
+// Composites the strokes of `page` accepted by `want` straight into
+// premultiplied RGBA8 pixels, honouring layer visibility/opacity and the
+// draw-behind pass like Rasterizer::renderPage. Only the pixels under each
+// stroke are touched. Reads only immutable data and the thread-safe cache, so
+// it may run on any thread.
 template <typename Filter>
-void renderOver(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale, float offset_x,
-                float offset_y, Filter want) {
-  e->rebuildIndex();
-  Bitmap bmp = Bitmap::fromPremultipliedRGBA8(pixels, width, height, stride);
+void renderOver(const Page& page, GeometryCache& cache, uint8_t* pixels, int width, int height, size_t stride,
+                float scale, float offset_x, float offset_y, Filter want) {
+  PixelBufferRGBA8 target{pixels, width, height, stride};
   const Affine t = Affine::translate(offset_x, offset_y) * Affine::scale(scale);
   RenderOptions opts;
   opts.drawBackground = false;
@@ -494,39 +575,58 @@ void renderOver(InkEditor* e, uint8_t* pixels, int width, int height, size_t str
   const Rect pageClip = t.inverse().apply(clipPx).inflated(1.0f);
   const float bucket = ppuBucket(scale);
   std::vector<size_t> visible;
-  bool drew = false;
-  auto drawLayer = [&](const Layer& layer, Bitmap& target) {
+  auto drawLayer = [&](const Layer& layer, PixelBufferRGBA8& into) {
     visible.clear();
     layer.query(pageClip, visible);
     for (int pass = 0; pass < 2; ++pass)
       for (size_t idx : visible) {
         const StrokePtr& s = layer.at(idx);
         if (s->style.drawBehind != (pass == 0) || !want(s->id)) continue;
-        Rasterizer::renderGeometry(e->geometry(s, bucket), s->style, target, t, opts);
-        drew = true;
+        std::shared_ptr<const StrokeGeometry> g = cache.get(s, bucket);
+        Rasterizer::renderGeometryOver(*g, s->style, into, t, opts);
       }
   };
-  for (const Layer& layer : e->editor.page().layers()) {
+  for (const Layer& layer : page.layers()) {
     if (!layer.visible || layer.opacity <= 0.0f) continue;
     if (layer.opacity >= 0.999f) {
-      drawLayer(layer, bmp);
+      drawLayer(layer, target);
       continue;
     }
     // Translucent layer: render in isolation, then fade it in as a whole.
-    Bitmap tmp(width, height);
+    std::vector<uint8_t> tmpPixels(static_cast<size_t>(width) * height * 4, 0);
+    PixelBufferRGBA8 tmp{tmpPixels.data(), width, height, static_cast<size_t>(width) * 4};
     drawLayer(layer, tmp);
     const float o = layer.opacity;
-    for (int y = 0; y < height; ++y)
-      for (int x = 0; x < width; ++x) {
-        const float* sp = tmp.pixel(x, y);
-        if (sp[3] <= 0.0f) continue;
-        float* d = bmp.pixel(x, y);
-        const float sa = sp[3] * o;
-        for (int i = 0; i < 3; ++i) d[i] = sp[i] * o + d[i] * (1.0f - sa);
-        d[3] = sa + d[3] * (1.0f - sa);
+    for (int y = 0; y < height; ++y) {
+      const uint8_t* sp = tmpPixels.data() + static_cast<size_t>(y) * width * 4;
+      uint8_t* d = pixels + static_cast<size_t>(y) * stride;
+      for (int x = 0; x < width * 4; x += 4) {
+        if (sp[x + 3] == 0) continue;
+        const float sa = sp[x + 3] * (o / 255.0f);
+        for (int i = 0; i < 4; ++i)
+          d[x + i] = static_cast<uint8_t>(std::min(255.0f, sp[x + i] * o + d[x + i] * (1.0f - sa) + 0.5f));
       }
+    }
   }
-  if (drew) bmp.toPremultipliedRGBA8(pixels, stride);
+}
+
+void renderSnapshotOver(const SnapshotData& snap, uint8_t* pixels, int width, int height, size_t stride, float scale,
+                        float offset_x, float offset_y) {
+  if (snap.hidden.empty()) {
+    renderOver(snap.page, *snap.cache, pixels, width, height, stride, scale, offset_x, offset_y,
+               [](StrokeId) { return true; });
+  } else {
+    renderOver(snap.page, *snap.cache, pixels, width, height, stride, scale, offset_x, offset_y,
+               [&snap](StrokeId id) { return snap.hidden.count(id) == 0; });
+  }
+}
+
+uint8_t* copyOut(const std::vector<uint8_t>& data, size_t* out_size) {
+  uint8_t* p = static_cast<uint8_t*>(std::malloc(std::max<size_t>(data.size(), 1)));
+  if (!p) return nullptr;
+  if (!data.empty()) std::memcpy(p, data.data(), data.size());
+  if (out_size) *out_size = data.size();
+  return p;
 }
 }  // namespace
 
@@ -535,12 +635,7 @@ extern "C" {
 void ink_editor_render_over_rgba(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale,
                                  float offset_x, float offset_y) {
   if (!e || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
-  if (e->hidden.empty()) {
-    renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y, [](StrokeId) { return true; });
-  } else {
-    renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y,
-               [e](StrokeId id) { return e->hidden.count(id) == 0; });
-  }
+  renderSnapshotOver(*e->currentSnapshot(), pixels, width, height, stride, scale, offset_x, offset_y);
 }
 
 void ink_editor_set_hidden(InkEditor* e, const InkStrokeId* ids, size_t count) {
@@ -548,6 +643,7 @@ void ink_editor_set_hidden(InkEditor* e, const InkStrokeId* ids, size_t count) {
   e->hidden.clear();
   if (ids)
     for (size_t i = 0; i < count; ++i) e->hidden.insert(ids[i]);
+  e->snapshot.reset();
 }
 
 void ink_editor_render_strokes_over_rgba(InkEditor* e, const InkStrokeId* ids, size_t count, uint8_t* pixels,
@@ -555,7 +651,7 @@ void ink_editor_render_strokes_over_rgba(InkEditor* e, const InkStrokeId* ids, s
                                          float offset_y) {
   if (!e || !ids || count == 0 || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
   std::unordered_set<StrokeId> wanted(ids, ids + count);
-  renderOver(e, pixels, width, height, stride, scale, offset_x, offset_y,
+  renderOver(e->editor.page(), *e->cache, pixels, width, height, stride, scale, offset_x, offset_y,
              [&wanted](StrokeId id) { return wanted.count(id) != 0; });
 }
 
@@ -625,7 +721,7 @@ uint8_t* ink_editor_save(const InkEditor* e, size_t* out_size) {
 bool ink_editor_load(InkEditor* e, const uint8_t* data, size_t size) {
   if (!e) return false;
   e->touched();
-  e->cache.clear();
+  e->cache->clear();
   return e->editor.load(data, size);
 }
 
@@ -636,6 +732,31 @@ char* ink_editor_export_svg(const InkEditor* e) {
   if (!p) return nullptr;
   std::memcpy(p, svg.c_str(), svg.size() + 1);
   return p;
+}
+
+// ---------------------------------------------------------------- snapshots
+
+InkSnapshot* ink_editor_snapshot(InkEditor* e) {
+  if (!e) return nullptr;
+  InkSnapshot* s = new (std::nothrow) InkSnapshot();
+  if (s) s->data = e->currentSnapshot();
+  return s;
+}
+
+void ink_snapshot_release(InkSnapshot* s) { delete s; }
+
+size_t ink_snapshot_stroke_count(const InkSnapshot* s) { return s && s->data ? s->data->page.strokeCount() : 0; }
+
+void ink_snapshot_render_over_rgba(const InkSnapshot* s, uint8_t* pixels, int width, int height, size_t stride,
+                                   float scale, float offset_x, float offset_y) {
+  if (!s || !s->data || !pixels || width <= 0 || height <= 0 || scale <= 0.0f) return;
+  renderSnapshotOver(*s->data, pixels, width, height, stride, scale, offset_x, offset_y);
+}
+
+uint8_t* ink_snapshot_save(const InkSnapshot* s, size_t* out_size) {
+  if (out_size) *out_size = 0;
+  if (!s || !s->data) return nullptr;
+  return copyOut(serializePage(s->data->page), out_size);
 }
 
 }  // extern "C"

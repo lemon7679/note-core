@@ -21,6 +21,12 @@ struct CurveSamplingOptions {
   float maxChord = 2.0f;                  ///< Max distance between samples (page units).
   float maxAngle = 6.0f * kPi / 180.0f;   ///< Max tangent turn per sample (radians).
   int maxSubdivisions = 64;               ///< Per control segment.
+  /// Wide ink needs no more samples on straight runs than narrow ink, but the
+  /// pixel-based maxChord makes a 300 px wide highlighter emit a primitive every
+  /// few pixels, each covering the whole width. When > 0, a segment's chord
+  /// limit grows to this fraction of its (narrower) end width; curves are still
+  /// bounded by maxAngle. Per segment, so incremental tessellation stays exact.
+  float widthChordFactor = 0.0f;
 };
 
 /// Centripetal Catmull–Rom (alpha = 0.5) through stroke control points.

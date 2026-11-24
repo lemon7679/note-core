@@ -12,8 +12,12 @@ void StrokeGeometry::append(const StrokeGeometry& o) {
 
 namespace {
 
-CurveSamplingOptions samplingFor(const TessellationOptions& opts) {
+CurveSamplingOptions samplingFor(const StrokeStyle& style, const TessellationOptions& opts) {
   CurveSamplingOptions c;
+  // Vector tips: straight runs of wide ink need few primitives (each one is a
+  // capsule / nib sweep that is exact for linear motion). Stamps walk by
+  // spacing instead and keep the fine sampling.
+  if (style.method == RenderMethod::Vector) c.widthChordFactor = opts.widthChordFactor;
   float ppu = std::max(opts.pixelsPerUnit, 1e-3f);
   c.maxChord = std::max(opts.maxChordPixels, 0.25f) / ppu;
   c.maxAngle = opts.maxAngleDegrees * kPi / 180.0f;
@@ -87,7 +91,7 @@ struct Emitter {
     if (style.opacityJitter > 0.0f) alpha *= 1.0f - style.opacityJitter * hashToUnit(hash32(seed, idx * 3u + 2u));
     p.alpha = alpha;
     // Tilted (side-of-lead) shading skims the grain peaks: shallower deposit.
-    p.depth = clamp01(s.pressure * (1.0f - 0.45f * clamp01(s.tilt)));
+    p.depth = clamp01(s.pressure * (1.0f - 0.30f * clamp01(s.tilt)));
     out.stamps.push_back(p);
     out.bounds.expand(c, rMajor);
   }
@@ -180,7 +184,7 @@ void Tessellator::tessellateSegments(const StrokeStyle& style, uint32_t seed, co
     if (!state.started) em.dot(pts[0]);
     return;
   }
-  CurveSamplingOptions sampling = samplingFor(opts);
+  CurveSamplingOptions sampling = samplingFor(style, opts);
   segEnd = std::min(segEnd, CatmullRom::segmentCount(count));
   std::vector<CurveSample> samples;
   samples.reserve(32);

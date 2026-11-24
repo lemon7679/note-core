@@ -80,7 +80,13 @@ struct TessellationOptions {
   float pixelsPerUnit = 2.0f;
   float maxChordPixels = 4.0f;
   float maxAngleDegrees = 6.0f;
-  float minStampSpacingPixels = 0.35f;
+  /// Vector strokes: chord limit grows to this fraction of the ink width
+  /// (see CurveSamplingOptions::widthChordFactor). 0 = pixel chord only.
+  float widthChordFactor = 0.5f;
+  /// Floor for the pencil stamp spacing. Stamps are otherwise spaced at a fixed
+  /// fraction of their width (StrokeStyle::spacing), which the rasterizer relies on
+  /// to normalize graphite density; keep this tiny.
+  float minStampSpacingPixels = 0.05f;
 };
 
 /// State carried between incremental tessellation calls (pencil stamp walk).

@@ -104,7 +104,10 @@ void CatmullRom::sampleSegment(const StrokePoint* pts, size_t count, size_t seg,
   float tangentLen = std::max(length(h.m1), length(h.m2));
   float approxLen = std::max(chord, tangentLen * 0.75f);
   int n = 1;
-  if (opts.maxChord > 0.0f) n = std::max(n, static_cast<int>(std::ceil(approxLen / opts.maxChord)));
+  float maxChord = opts.maxChord;
+  if (opts.widthChordFactor > 0.0f)
+    maxChord = std::max(maxChord, opts.widthChordFactor * std::min(a.width, b.width));
+  if (maxChord > 0.0f) n = std::max(n, static_cast<int>(std::ceil(approxLen / maxChord)));
   if (opts.maxAngle > 0.0f) n = std::max(n, static_cast<int>(std::ceil(turn / opts.maxAngle)));
   n = std::min(std::max(n, 1), std::max(opts.maxSubdivisions, 1));
 

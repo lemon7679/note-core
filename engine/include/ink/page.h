@@ -93,10 +93,17 @@ struct LayerChange {
 
 struct ChangeSet {
   std::vector<LayerChange> layers;
+  /// Optional tighter redraw area for the live edit (empty = bounds()). A
+  /// precise-eraser cut of vector ink sets it to the neighbourhood of the cut:
+  /// the pieces render exactly like the original stroke everywhere else, so a
+  /// long highlighter nicked by the eraser does not repaint its whole length.
+  Rect damage;
 
   bool empty() const;
   /// Page-space area touched by the change (for redraw).
   Rect bounds() const;
+  /// Area to repaint right after applying the change.
+  Rect redrawBounds() const { return damage.isEmpty() ? bounds() : damage; }
 };
 
 /// Applies / reverts a change. Returns false (and leaves the page untouched as

@@ -37,13 +37,15 @@ class GrainTexture {
 
 /// Fraction of graphite deposited on a texel of height `grain` (0..1) by a lead
 /// pressed to `depth` (0..1). Light pressure mostly marks the peaks of the paper;
-/// heavy pressure fills the valleys too. Valleys always keep a faint film
-/// (`floor`) — real graphite never leaves perfectly clean holes.
+/// heavy pressure fills the valleys too. The transition is wide and valleys
+/// keep a generous film (`floor`), so the texture reads as soft, velvety
+/// mottling rather than hard speckles; repeated passes fill it in further
+/// because the rasterizer accumulates graphite density.
 inline float grainDeposit(float grain, float depth, float strength) {
   depth = clamp01(depth);
-  float threshold = lerp(0.80f, 0.05f, depth);
-  float peaks = smoothstep(threshold - 0.30f, threshold + 0.30f, grain);
-  float floor = 0.18f + 0.30f * depth;
+  float threshold = lerp(0.72f, 0.10f, depth);
+  float peaks = smoothstep(threshold - 0.50f, threshold + 0.50f, grain);
+  float floor = 0.15f + 0.65f * depth;
   return lerp(1.0f, lerp(floor, 1.0f, peaks), clamp01(strength));
 }
 

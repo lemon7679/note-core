@@ -21,7 +21,8 @@
 extern "C" {
 #endif
 
-typedef struct InkEditor InkEditor;   /* one page + undo history */
+typedef struct InkEditor InkEditor;     /* one page + undo history */
+typedef struct InkSnapshot InkSnapshot; /* immutable copy of a page's ink, usable from any thread */
 typedef struct InkBuilder InkBuilder; /* the stroke being drawn */
 typedef uint64_t InkStrokeId;
 
@@ -136,6 +137,7 @@ typedef struct InkStyleInfo {
   float grain_strength;
   float grain_scale;
   bool draw_behind;
+  float stamp_spacing; /* stamp spacing / stamp width (GPU pencil density normalization) */
 } InkStyleInfo;
 
 /* ---------------------------------------------------------------- misc */
@@ -260,7 +262,8 @@ void ink_editor_render_rgba(InkEditor* e, uint8_t* pixels, int width, int height
 /* Tile rendering: composites the page's strokes over premultiplied RGBA8
  * pixels that already hold the paper / PDF background, so highlighter
  * Multiply darkens the real background. Uses the cached tessellation of
- * ink_editor_stroke_geometry, so re-rendering tiles at one zoom is cheap. */
+ * ink_editor_stroke_geometry, so re-rendering tiles at one zoom is cheap, and
+ * touches only the pixels under ink. */
 void ink_editor_render_over_rgba(InkEditor* e, uint8_t* pixels, int width, int height, size_t stride, float scale,
                                  float offset_x, float offset_y);
 /* Lasso drag preview: strokes in the hidden set are skipped by
@@ -279,6 +282,25 @@ bool ink_editor_load(InkEditor* e, const uint8_t* data, size_t size);
 float ink_editor_page_width(const InkEditor* e);
 float ink_editor_page_height(const InkEditor* e);
 char* ink_editor_export_svg(const InkEditor* e);
+
+/* Snapshots: render and save off the editing thread.
+ *
+ * Editor calls must stay on one thread, but a snapshot is an immutable view of
+ * the page at the moment it was taken (strokes are shared, not copied: taking
+ * one is O(strokes) pointer copies, and repeated calls without edits in between
+ * share the same data). Snapshots may be rendered and saved from any number of
+ * threads at once while the editor keeps changing; they share the editor's
+ * thread-safe tessellation cache. Typical use: a tile renderer on worker
+ * threads, autosave on an I/O thread. Release every snapshot (any thread). */
+InkSnapshot* ink_editor_snapshot(InkEditor* e);
+void ink_snapshot_release(InkSnapshot* s);
+size_t ink_snapshot_stroke_count(const InkSnapshot* s);
+/* Same output as ink_editor_render_over_rgba at the time of the snapshot
+ * (hidden strokes included in the snapshot are skipped). */
+void ink_snapshot_render_over_rgba(const InkSnapshot* s, uint8_t* pixels, int width, int height, size_t stride,
+                                   float scale, float offset_x, float offset_y);
+/* Same bytes as ink_editor_save at the time of the snapshot (free with ink_free). */
+uint8_t* ink_snapshot_save(const InkSnapshot* s, size_t* out_size);
 
 #ifdef __cplusplus
 }

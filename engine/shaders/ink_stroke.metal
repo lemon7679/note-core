@@ -8,16 +8,19 @@
 // Two passes per stroke (or per live stroke each frame):
 //
 //  1. COVERAGE: draw every primitive of the stroke as an instanced quad into a
-//     single-channel coverage texture (R16Float or R8Unorm, cleared to 0) with
-//       blending: rgbBlendOperation = .max, source/destination factors = .one
-//     so overlapping primitives of the same stroke never accumulate.
+//     single-channel texture (R16Float, cleared to 0).
 //       capsules -> ink_capsule_vertex / ink_coverage_capsule
 //       nibs     -> ink_nib_vertex     / ink_coverage_nib
+//         blending: rgbBlendOperation = .max, source/destination factors = .one
+//         so overlapping primitives of the same stroke never accumulate.
 //       stamps   -> ink_stamp_vertex   / ink_coverage_stamp (needs the grain texture)
+//         blending: rgbBlendOperation = .add, factors = .one: the texture holds
+//         graphite *density* (pencil strokes have only stamps).
 //
 //  2. COMPOSITE: draw the stroke's bounds (InkGeometryView.bounds) with
 //     ink_composite_vertex / ink_composite_fragment onto the page texture
-//     (premultiplied alpha):
+//     (premultiplied alpha). For stamp strokes set CompositeUniforms.density = 1
+//     so the fragment converts density to coverage (1 - exp(-density)):
 //       Normal:   source = .one,               destination = .oneMinusSourceAlpha
 //       Multiply: source = .destinationColor,  destination = .oneMinusSourceAlpha
 //
@@ -62,13 +65,14 @@ struct StampUniforms {
   float hardness;
   float grainStrength;
   float grainScale;  // page units per texel
-  float pad;
+  float spacing;     // StrokeStyle::spacing (stamp spacing / stamp width)
 };
 
 struct CompositeUniforms {
   float4 color;     // straight sRGB color
   float opacity;
-  float3 pad;
+  float density;    // 1 = the coverage texture holds graphite density (stamp strokes)
+  float2 pad;
 };
 
 constant float kMinRadiusPx = 0.5;
@@ -133,10 +137,17 @@ static inline float coverageFromDistance(float d) { return saturate(0.5 - d); }
 
 static float grainDeposit(float grain, float depth, float strength) {
   depth = saturate(depth);
-  float threshold = mix(0.80, 0.05, depth);
-  float peaks = smoothstep(threshold - 0.30, threshold + 0.30, grain);
-  float floorValue = 0.18 + 0.30 * depth;
+  float threshold = mix(0.72, 0.10, depth);
+  float peaks = smoothstep(threshold - 0.50, threshold + 0.50, grain);
+  float floorValue = 0.15 + 0.65 * depth;
   return mix(1.0, mix(floorValue, 1.0, peaks), saturate(strength));
+}
+
+// Mean of smoothstep(0, 1, (1 - q) / edge) over q in [0, 1].
+static float meanFalloff(float edge) {
+  if (edge <= 1.0) return 1.0 - 0.5 * edge;
+  float x = 1.0 / edge;
+  return edge * (x * x * x - 0.5 * x * x * x * x);
 }
 
 // Quad corners for vertex ids 0..3 (triangle strip).
@@ -239,11 +250,13 @@ struct StampVOut {
   float2 center [[flat]];
   float2 axis [[flat]];
   float4 params [[flat]];  // rMajor, rMinor, alpha (incl. small-dot scale), depth
+  float spacing [[flat]];  // pixels between stamps along the path
 };
 
 vertex StampVOut ink_stamp_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                                   const device Stamp* stamps [[buffer(0)]],
-                                  constant ViewUniforms& u [[buffer(1)]]) {
+                                  constant ViewUniforms& u [[buffer(1)]],
+                                  constant StampUniforms& su [[buffer(2)]]) {
   Stamp s = stamps[iid];
   float ra = s.rMajor * u.scale, rb = s.rMinor * u.scale, k = 1.0;
   if (ra < kMinRadiusPx) {
@@ -261,7 +274,8 @@ vertex StampVOut ink_stamp_vertex(uint vid [[vertex_id]], uint iid [[instance_id
   o.position = toClip(u, c + axis * (cr.x * (ra + 1.0)) + v * (cr.y * (rb + 1.0)));
   o.center = c;
   o.axis = axis;
-  o.params = float4(ra, rb, s.alpha * k, s.depth);
+  o.params = float4(ra, rb, min(s.alpha * k, 0.985), s.depth);
+  o.spacing = max(2.0 * s.rMajor * u.scale * max(su.spacing, 0.01), 1e-3);
   return o;
 }
 
@@ -278,8 +292,11 @@ fragment float4 ink_coverage_stamp(StampVOut in [[stage_in]],
   float q2 = qx * qx + qy * qy;
   if (q2 >= 1.0) return float4(0.0);
   float edge = max(1.0 - saturate(su.hardness), 1.0 / min(in.params.x, in.params.y));
-  float f = smoothstep(0.0, 1.0, (1.0 - sqrt(q2)) / edge);
-  float val = f * in.params.z;
+  // Graphite density (additive): lambda is chosen so a straight line's centre,
+  // covered by ~overlaps stamps, reaches the stamp alpha after 1 - exp(-density).
+  float overlaps = max(1.0, 2.0 * sqrt(in.params.x * in.params.y) / in.spacing * meanFalloff(edge));
+  float lambda = -log(1.0 - in.params.z) / overlaps;
+  float val = lambda * smoothstep(0.0, 1.0, (1.0 - sqrt(q2)) / edge);
   if (su.grainStrength > 0.0) {
     float2 page = toPageFromPixel(u, p);
     float g = grain.sample(grainSampler, page / max(su.grainScale, 1e-3) / 256.0).r;
@@ -310,6 +327,7 @@ fragment float4 ink_composite_fragment(CompositeVOut in [[stage_in]],
                                        constant CompositeUniforms& cu [[buffer(0)]],
                                        texture2d<float> coverage [[texture(0)]]) {
   float m = coverage.read(uint2(in.position.xy)).r;
+  if (cu.density > 0.5) m = 1.0 - exp(-m);  // pencil: density -> coverage
   float a = saturate(m) * saturate(cu.opacity) * saturate(cu.color.a);
   return float4(cu.color.rgb * a, a);  // premultiplied
 }

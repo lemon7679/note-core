@@ -56,7 +56,7 @@ void PageEditor::beginErase(const EraserOptions& opts, Vec2 p) {
   erasing_ = true;
   eraserOpts_ = opts;
   eraserPos_ = p;
-  history_.beginGroup("Erase");
+  history_.beginGroup("Erase", &page_);
   eraseTo(p);  // a tap erases too
 }
 
@@ -64,13 +64,16 @@ bool PageEditor::eraseTo(Vec2 p) {
   if (!erasing_) return false;
   ChangeSet cs = eraseAlong(page_, activeLayer_, eraserPos_, p, eraserOpts_);
   eraserPos_ = p;
-  return record(std::move(cs), "Erase");
+  if (cs.empty()) return false;
+  dirty_.expand(cs.redrawBounds());
+  history_.push(std::move(cs), "Erase");
+  return true;
 }
 
 void PageEditor::endErase() {
   if (!erasing_) return;
   erasing_ = false;
-  history_.endGroup();
+  history_.endGroup(&page_);
 }
 
 std::vector<StrokeId> PageEditor::selectLasso(const std::vector<Vec2>& lasso, float minInsideFraction) const {

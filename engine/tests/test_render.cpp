@@ -131,8 +131,41 @@ TEST(render_pencil_pressure_darkens) {
       for (int x = 20; x < 80; ++x) d += 1.0 - luminance(b, x, y);
     return d;
   };
-  CHECK(avgDarkness(0.9f, 0.9f) > avgDarkness(0.2f, 0.9f) * 1.3);
+  // Deeper lead fills more of the paper's valleys (alpha fixed below saturation).
+  CHECK(avgDarkness(0.9f, 0.6f) > avgDarkness(0.2f, 0.6f) * 1.3);
   CHECK(avgDarkness(0.5f, 0.9f) > avgDarkness(0.5f, 0.3f) * 2.0);
+}
+
+TEST(render_pencil_is_soft_and_builds_up) {
+  Brush pencil = presets::pencil();
+  auto render1 = [&](int passes) {
+    PageEditor ed(100, 30);
+    for (int k = 0; k < passes; ++k) {
+      Stroke s = polyStroke({{10, 15.5f}, {90, 15.5f}}, pencil, 8.0f, 0.4f);
+      for (StrokePoint& p : s.points) p.alpha = 0.5f;
+      ed.commitStroke(s);
+    }
+    Bitmap b(100, 30);
+    Rasterizer::renderPage(ed.page(), b, Affine::scale(1.0f));
+    return b;
+  };
+  Bitmap once = render1(1), twice = render1(2);
+  // Averaged over the grain, the centre reaches about the stroke's alpha...
+  double centre = 0.0;
+  for (int x = 20; x < 80; ++x) centre += 1.0 - luminance(once, x, 15);
+  centre /= 60.0;
+  CHECK(centre > 0.25 && centre < 0.55);
+  // ...falls off smoothly towards the edge (no hard cut)...
+  double mid = 0.0, rim = 0.0;
+  for (int x = 20; x < 80; ++x) {
+    mid += 1.0 - luminance(once, x, 17);  // 2 px from the centre line
+    rim += 1.0 - luminance(once, x, 18);  // 3 px (radius 4)
+  }
+  CHECK(mid / 60.0 < centre && rim / 60.0 < mid / 60.0 && rim / 60.0 > 0.0);
+  // ...and a second pass over the same place deposits more graphite.
+  double again = 0.0;
+  for (int x = 20; x < 80; ++x) again += 1.0 - luminance(twice, x, 15);
+  CHECK(again / 60.0 > centre * 1.3);
 }
 
 TEST(render_layer_visibility_and_opacity) {

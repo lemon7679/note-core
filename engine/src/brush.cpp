@@ -46,10 +46,10 @@ Brush pencil(Color color, float width) {
   b.style.method = RenderMethod::Stamp;
   b.style.tip = TipShape::Round;
   b.style.color = color;
-  b.style.hardness = 0.30f;
-  b.style.spacing = 0.07f;
-  b.style.grainStrength = 0.85f;
-  b.style.grainScale = 0.35f;
+  b.style.hardness = 0.60f;
+  b.style.spacing = 0.08f;
+  b.style.grainStrength = 0.80f;
+  b.style.grainScale = 0.30f;
   b.style.tiltAspect = 2.2f;
   b.style.positionJitter = 0.05f;
   b.style.opacityJitter = 0.10f;
