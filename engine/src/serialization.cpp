@@ -1,5 +1,6 @@
 #include "ink/serialization.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 
@@ -119,7 +120,9 @@ inline uint8_t angleToByte(float a) {
 inline float byteToAngle(uint8_t b) { return wrapAngle(static_cast<float>(b) / 256.0f * kTwoPi - kPi); }
 inline int64_t quant(float v, float q) { return static_cast<int64_t>(std::llround(static_cast<double>(v) * q)); }
 
-void writeStyle(Writer& w, const StrokeStyle& s) {
+/// The style block also carries the stroke's eraser holes after the style
+/// fields. Readers that predate holes skip them with the rest of the block.
+void writeStyle(Writer& w, const StrokeStyle& s, const std::vector<EraseHole>& holes) {
   Writer b;
   b.u8(static_cast<uint8_t>(s.kind));
   b.u8(static_cast<uint8_t>(s.method));
@@ -131,10 +134,22 @@ void writeStyle(Writer& w, const StrokeStyle& s) {
   b.f32(s.hardness); b.f32(s.spacing); b.f32(s.grainStrength); b.f32(s.grainScale);
   b.f32(s.tiltAspect); b.f32(s.positionJitter); b.f32(s.opacityJitter);
   b.u8(s.drawBehind ? 1 : 0);
+  if (!holes.empty()) {
+    b.varint(holes.size());
+    int64_t px = 0, py = 0;
+    for (const EraseHole& h : holes) {
+      int64_t ax = quant(h.a.x, kPosQuant), ay = quant(h.a.y, kPosQuant);
+      int64_t bx = quant(h.b.x, kPosQuant), by = quant(h.b.y, kPosQuant);
+      b.svarint(ax - px); b.svarint(ay - py);
+      b.svarint(bx - ax); b.svarint(by - ay);
+      b.varint(static_cast<uint64_t>(std::max<int64_t>(quant(h.radius, kPosQuant), 0)));
+      px = bx; py = by;
+    }
+  }
   w.bytes(b.buf);
 }
 
-bool readStyle(Reader& r, StrokeStyle& s) {
+bool readStyle(Reader& r, StrokeStyle& s, std::vector<EraseHole>& holes) {
   Reader b = r.block();
   if (!r.ok()) return false;
   uint8_t kind = b.u8(), method = b.u8(), tip = b.u8(), blend = b.u8();
@@ -149,13 +164,30 @@ bool readStyle(Reader& r, StrokeStyle& s) {
   s.hardness = b.f32(); s.spacing = b.f32(); s.grainStrength = b.f32(); s.grainScale = b.f32();
   s.tiltAspect = b.f32(); s.positionJitter = b.f32(); s.opacityJitter = b.f32();
   s.drawBehind = b.u8() != 0;
+  holes.clear();
+  if (b.ok() && b.remaining() > 0) {
+    uint64_t n = b.varint();
+    // Each hole needs at least 5 bytes.
+    if (!b.ok() || n > b.remaining() / 5) return false;
+    holes.resize(static_cast<size_t>(n));
+    int64_t px = 0, py = 0;
+    for (EraseHole& h : holes) {
+      int64_t ax = px + b.svarint(), ay = py + b.svarint();
+      int64_t bx = ax + b.svarint(), by = ay + b.svarint();
+      h.a = {static_cast<float>(ax) / kPosQuant, static_cast<float>(ay) / kPosQuant};
+      h.b = {static_cast<float>(bx) / kPosQuant, static_cast<float>(by) / kPosQuant};
+      h.radius = static_cast<float>(b.varint()) / kPosQuant;
+      px = bx; py = by;
+    }
+    if (!b.ok()) return false;
+  }
   // Any trailing bytes belong to newer versions and are ignored.
   return b.ok();
 }
 
 void writeStroke(Writer& w, const Stroke& s) {
   w.varint(s.id);
-  writeStyle(w, s.style);
+  writeStyle(w, s.style, s.holes);
   w.u32(s.seed);
   w.varint(s.points.size());
   int64_t px = 0, py = 0, pw = 0, pt = 0;
@@ -174,7 +206,7 @@ void writeStroke(Writer& w, const Stroke& s) {
 
 bool readStroke(Reader& r, Stroke& s) {
   s.id = r.varint();
-  if (!readStyle(r, s.style)) return false;
+  if (!readStyle(r, s.style, s.holes)) return false;
   s.seed = r.u32();
   uint64_t n = r.varint();
   // Each point needs at least 9 bytes: reject impossible counts before allocating.

@@ -7,6 +7,7 @@ void StrokeGeometry::append(const StrokeGeometry& o) {
   capsules.insert(capsules.end(), o.capsules.begin(), o.capsules.end());
   nibs.insert(nibs.end(), o.nibs.begin(), o.nibs.end());
   stamps.insert(stamps.end(), o.stamps.begin(), o.stamps.end());
+  holes.insert(holes.end(), o.holes.begin(), o.holes.end());
   bounds.expand(o.bounds);
 }
 
@@ -164,6 +165,16 @@ struct Emitter {
 
 void Tessellator::tessellate(const Stroke& stroke, const TessellationOptions& opts, StrokeGeometry& out) {
   tessellate(stroke.style, stroke.seed, stroke.points.data(), stroke.points.size(), opts, out);
+  if (out.empty()) return;
+  for (const EraseHole& h : stroke.holes) {
+    if (!h.bounds().intersects(out.bounds)) continue;
+    CapsulePrim c;
+    c.p0 = h.a;
+    c.p1 = h.b;
+    c.r0 = c.r1 = h.radius;
+    c.a0 = c.a1 = 1.0f;
+    out.holes.push_back(c);
+  }
 }
 
 void Tessellator::tessellate(const StrokeStyle& style, uint32_t seed, const StrokePoint* pts, size_t count,
@@ -211,6 +222,12 @@ void transformGeometry(StrokeGeometry& geom, const Affine& t) {
     n.h1 *= s;
     n.round *= s;
     n.dir = normalize(t.applyVector(n.dir));
+  }
+  for (CapsulePrim& c : geom.holes) {
+    c.p0 = t.apply(c.p0);
+    c.p1 = t.apply(c.p1);
+    c.r0 *= s;
+    c.r1 *= s;
   }
   for (StampPrim& p : geom.stamps) {
     p.center = t.apply(p.center);

@@ -1,6 +1,7 @@
 #include <memory>
 
 #include "ink/editor.h"
+#include "ink/rasterizer.h"
 #include "ink/serialization.h"
 #include "ink/svg_export.h"
 #include "../tools/synth_input.h"
@@ -130,8 +131,18 @@ TEST(precise_eraser_splits_and_undoes) {
   const Stroke& left = *layer.at(0);
   const Stroke& right = *layer.at(1);
   CHECK_NEAR(left.points.front().pos.x, 0.0, 1e-4);
-  CHECK_NEAR(left.points.back().pos.x, 45.0, 0.05);   // cut exactly at the eraser edge
-  CHECK_NEAR(right.points.front().pos.x, 55.0, 0.05);
+  // Pieces end just inside the erased band (the hole hides the rest of their cap).
+  CHECK(left.points.back().pos.x >= 45.0f && left.points.back().pos.x <= 47.0f);
+  CHECK(right.points.front().pos.x >= 53.0f && right.points.front().pos.x <= 55.0f);
+  REQUIRE(left.holes.size() == 1);  // the straight drag is one hole
+  CHECK(right.holes.size() == 1);
+  {
+    Bitmap bmp(400, 40, colors::kWhite);
+    Rasterizer::renderPage(ed.page(), bmp, Affine::translate(0, 20) * Affine::scale(4.0f));
+    auto inkAt = [&](float x) { return bmp.colorAt(static_cast<int>(x * 4.0f), 20).r < 0.5f; };
+    CHECK(inkAt(10) && inkAt(44.5f) && inkAt(55.5f) && inkAt(90));
+    CHECK(!inkAt(45.5f) && !inkAt(50) && !inkAt(54.5f));
+  }
   CHECK_NEAR(right.points.back().pos.x, 100.0, 1e-4);
   CHECK(layer.at(2)->points.front().pos.y == 50.0f);  // z-order kept
   CHECK(left.style.kind == original->style.kind);
@@ -163,6 +174,159 @@ TEST(precise_eraser_removes_crumbs_and_dots) {
   ed.beginErase(o, {50, 0});
   ed.endErase();
   CHECK(ed.page().strokeCount() == 0);
+}
+
+namespace {
+
+/// Page rendered at 4 px per unit on white.
+Bitmap render4(const Page& page) {
+  Bitmap bmp(static_cast<int>(page.width * 4), static_cast<int>(page.height * 4), colors::kWhite);
+  Rasterizer::renderPage(page, bmp, Affine::scale(4.0f));
+  return bmp;
+}
+/// True if the page has visible ink at (x, y) (page units).
+bool inked(const Bitmap& b, float x, float y) {
+  Color c = b.colorAt(static_cast<int>(x * 4.0f), static_cast<int>(y * 4.0f));
+  return c.r + c.g + c.b < 2.97f;
+}
+
+}  // namespace
+
+TEST(precise_eraser_on_highlighter_edge_removes_only_what_it_touches) {
+  // A 5 mm highlighter (band y = 93..107). Brushing along its top edge with a
+  // small eraser must leave a notch, not take out the whole height.
+  PageEditor ed(300, 200);
+  Brush hl = presets::highlighter();
+  const float half = 0.5f * hl.dynamics.width;
+  ed.commitStroke(straight({20, 100}, {280, 100}, hl, 60));
+  const StrokePtr original = ed.page().layers()[0].at(0);
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 3.0f;
+  const float y = 100.0f - half;  // eraser centre on the top edge
+  ed.beginErase(o, {100, y});
+  for (float x = 100; x <= 200; x += 1.5f) ed.eraseTo({x, y});
+  ed.endErase();
+
+  const Layer& layer = ed.page().layers()[0];
+  REQUIRE(layer.size() == 1);  // nothing cut: the band below the eraser still shows
+  const Stroke& s = *layer.at(0);
+  CHECK(s.id == original->id);
+  CHECK(s.points.size() == original->points.size());
+  CHECK(s.holes.size() == 1);  // one straight drag = one hole
+  Bitmap b = render4(ed.page());
+  CHECK(!inked(b, 150, y + 1.0f));          // under the eraser: gone
+  CHECK(!inked(b, 150, y + o.radius - 0.6f));
+  CHECK(inked(b, 150, y + o.radius + 0.6f));  // just below the eraser: still there
+  CHECK(inked(b, 150, 100));
+  CHECK(inked(b, 150, 100 + half - 1.0f));
+  CHECK(inked(b, 60, y + 1.0f));   // beside the stroke of the eraser: untouched
+  CHECK(inked(b, 240, y + 1.0f));
+  // Erasing the same place again changes nothing (no hole pile-up).
+  ed.beginErase(o, {150, y});
+  CHECK(!ed.eraseTo({151, y}));
+  ed.endErase();
+  CHECK(layer.at(0)->holes.size() == 1);
+}
+
+TEST(precise_eraser_across_highlighter_cuts_where_fully_erased) {
+  PageEditor ed(300, 200);
+  Brush hl = presets::highlighter();
+  const float half = 0.5f * hl.dynamics.width;
+  ed.commitStroke(straight({20, 100}, {280, 100}, hl, 60));
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 4.0f;
+  // A small eraser scrubbing up and down across the band erases a gap.
+  ed.beginErase(o, {140, 85});
+  for (int i = 0; i <= 12; ++i) ed.eraseTo({140.0f + i * 1.5f, i % 2 ? 85.0f : 115.0f});
+  ed.endErase();
+  const Layer& layer = ed.page().layers()[0];
+  REQUIRE(layer.size() == 2);  // fully hidden middle part is cut away
+  CHECK(layer.at(0)->bounds.maxX < 160.0f);
+  CHECK(layer.at(1)->bounds.minX > 140.0f);
+  Bitmap b = render4(ed.page());
+  for (float yy = 100 - half + 0.5f; yy < 100 + half; yy += 1.0f) {
+    CHECK(!inked(b, 148, yy));
+    CHECK(inked(b, 130, yy));
+    CHECK(inked(b, 165, yy));
+  }
+  // Undo restores the original in one step.
+  ed.undo();
+  REQUIRE(layer.size() == 1);
+  CHECK(layer.at(0)->holes.empty());
+}
+
+TEST(precise_eraser_render_matches_area_of_eraser) {
+  // Thick marker: the ink that disappears is exactly the eraser's swept area.
+  PageEditor ed(200, 100);
+  Brush mk = presets::marker(colors::kBlack, 12.0f);
+  ed.commitStroke(straight({20, 50}, {180, 50}, mk, 40));
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 4.0f;
+  ed.beginErase(o, {100, 50});  // a tap in the middle of the stroke
+  ed.endErase();
+  REQUIRE(ed.page().strokeCount() == 1);
+  Bitmap b = render4(ed.page());
+  CHECK(!inked(b, 100, 50));
+  CHECK(!inked(b, 103.4f, 50));
+  CHECK(inked(b, 104.6f, 50));
+  CHECK(inked(b, 100, 45.2f));  // above the 4 pt eraser disk, inside the 6 pt half-width
+  CHECK(inked(b, 100, 54.8f));
+}
+
+TEST(stroke_eraser_ignores_erased_gaps) {
+  PageEditor ed(300, 200);
+  ed.commitStroke(straight({20, 100}, {280, 100}, presets::highlighter(), 60));
+  EraserOptions precise;
+  precise.mode = EraserMode::Precise;
+  precise.radius = 4.0f;
+  // Wipe the top half of the band over x = 100..200.
+  ed.beginErase(precise, {100, 95});
+  ed.eraseTo({200, 95});
+  ed.endErase();
+  REQUIRE(ed.page().strokeCount() == 1);
+  EraserOptions whole;
+  whole.radius = 1.0f;
+  ed.beginErase(whole, {150, 94});  // inside the wiped area: nothing left to touch
+  ed.endErase();
+  CHECK(ed.page().strokeCount() == 1);
+  ed.beginErase(whole, {150, 105});  // the remaining ink
+  ed.endErase();
+  CHECK(ed.page().strokeCount() == 0);
+}
+
+TEST(eraser_holes_follow_transform_and_survive_save) {
+  PageEditor ed(300, 200);
+  StrokeId id = ed.commitStroke(straight({20, 100}, {280, 100}, presets::highlighter(), 60));
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 3.0f;
+  ed.beginErase(o, {100, 100});
+  ed.endErase();
+  REQUIRE(ed.page().layers()[0].at(0)->holes.size() == 1);
+  ed.transform({id}, Affine::translate(10, 20));
+  const Stroke& moved = *ed.page().layers()[0].at(0);
+  REQUIRE(moved.holes.size() == 1);
+  CHECK_NEAR(moved.holes[0].a.x, 110.0, 1e-4);
+  CHECK_NEAR(moved.holes[0].a.y, 120.0, 1e-4);
+  Bitmap b = render4(ed.page());
+  CHECK(!inked(b, 110, 120));
+  CHECK(inked(b, 120, 120));
+
+  std::vector<uint8_t> data = ed.save();
+  Page out;
+  REQUIRE(deserializePage(data.data(), data.size(), out));
+  const Stroke& loaded = *out.layers()[0].at(0);
+  REQUIRE(loaded.holes.size() == 1);
+  CHECK(distance(loaded.holes[0].a, moved.holes[0].a) < 0.01f);
+  CHECK(distance(loaded.holes[0].b, moved.holes[0].b) < 0.01f);
+  CHECK_NEAR(loaded.holes[0].radius, 3.0, 0.006);
+  Stroke clip;
+  std::vector<uint8_t> one = serializeStroke(moved);
+  REQUIRE(deserializeStroke(one.data(), one.size(), clip));
+  CHECK(clip.holes.size() == 1);
 }
 
 TEST(eraser_kind_mask) {
@@ -298,6 +462,23 @@ TEST(svg_export_outlines) {
   for (size_t at = svg.find("<path"); at != std::string::npos; at = svg.find("<path", at + 1)) ++paths;
   CHECK(paths == 2);
   CHECK(svg.find("mix-blend-mode:multiply") != std::string::npos);
+}
+
+TEST(svg_export_masks_erased_ink) {
+  PageEditor ed;
+  ed.commitStroke(straight({10, 30}, {100, 30}, presets::highlighter()));
+  EraserOptions o;
+  o.mode = EraserMode::Precise;
+  o.radius = 3.0f;
+  ed.beginErase(o, {50, 30});
+  ed.endErase();
+  std::string svg = exportSvg(ed.page());
+  size_t paths = 0;
+  for (size_t at = svg.find("<path"); at != std::string::npos; at = svg.find("<path", at + 1)) ++paths;
+  CHECK(paths == 1);  // the hole is a <polygon> in a <mask>, never an ink <path>
+  CHECK(svg.find("<mask id=\"e") != std::string::npos);
+  CHECK(svg.find("<polygon points=\"") != std::string::npos);
+  CHECK(svg.find("mask=\"url(#e") != std::string::npos);
 }
 
 TEST(erase_gesture_history_is_the_net_change) {

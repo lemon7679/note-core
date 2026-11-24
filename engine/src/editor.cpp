@@ -56,13 +56,36 @@ void PageEditor::beginErase(const EraserOptions& opts, Vec2 p) {
   erasing_ = true;
   eraserOpts_ = opts;
   eraserPos_ = p;
+  eraserRun_.assign(1, p);
   history_.beginGroup("Erase", &page_);
   eraseTo(p);  // a tap erases too
 }
 
 bool PageEditor::eraseTo(Vec2 p) {
   if (!erasing_) return false;
-  ChangeSet cs = eraseAlong(page_, activeLayer_, eraserPos_, p, eraserOpts_);
+  // A straight stretch of the eraser path can be one hole per stroke: the
+  // capsule from the run's start to `p` covers every move of the run to within
+  // `tol` when all run points lie that close to it, in order.
+  bool extend = false;
+  if (!eraserRun_.empty() && eraserRun_.size() < 256) {
+    const Vec2 a = eraserRun_.front();
+    const float len = distance(a, p);
+    const float tol = std::max(0.02f * eraserOpts_.radius, 1e-3f);
+    if (len > 1e-6f) {
+      const Vec2 dir = (p - a) / len;
+      float last = 0.0f;
+      extend = eraserRun_.size() >= 2;
+      for (size_t i = 1; extend && i < eraserRun_.size(); ++i) {
+        const Vec2 q = eraserRun_[i];
+        const float t = dot(q - a, dir);
+        extend = t >= last - 1e-6f && t <= len + 1e-6f && pointSegmentDistance(q, a, p) <= tol;
+        last = t;
+      }
+    }
+  }
+  ChangeSet cs = eraseAlong(page_, activeLayer_, eraserPos_, p, eraserOpts_, extend);
+  if (!extend) eraserRun_.assign(1, eraserPos_);
+  eraserRun_.push_back(p);
   eraserPos_ = p;
   if (cs.empty()) return false;
   dirty_.expand(cs.redrawBounds());
@@ -115,6 +138,7 @@ std::vector<StrokeId> PageEditor::addStrokes(const std::vector<Stroke>& strokes,
     auto copy = std::make_shared<Stroke>(src);
     copy->id = page_.allocateStrokeId();
     for (StrokePoint& p : copy->points) p.pos += offset;
+    copy->translateHoles(offset);
     copy->updateBounds();
     out.push_back(copy->id);
     lc.added.emplace_back(at++, std::move(copy));

@@ -176,6 +176,42 @@ TEST(gpu_tiles_match_cpu_reference) {
   ink_editor_destroy(e);
 }
 
+TEST(gpu_erased_ink_matches_cpu_reference) {
+  if (!gpu().gpu) return;
+  std::vector<uint8_t> data = mixedPage();
+  InkEditor* e = ink_editor_create(300, 300);
+  REQUIRE(ink_editor_load(e, data.data(), data.size()));
+  // Precise eraser: along highlighter edges, across pencil and pens, scrubbing.
+  ink_editor_erase_begin(e, INK_ERASER_PRECISE, 3.0f, 0, 30, 24);
+  for (int i = 0; i <= 80; ++i) ink_editor_erase_move(e, 30.0f + i * 2.5f, 24.0f + 2.0f * std::sin(i * 0.2f));
+  ink_editor_erase_end(e);
+  ink_editor_erase_begin(e, INK_ERASER_PRECISE, 5.0f, 0, 60, 10);
+  for (int i = 0; i <= 60; ++i) ink_editor_erase_move(e, 60.0f + i * 0.8f, i % 2 ? 10.0f : 290.0f);
+  ink_editor_erase_end(e);
+  ink_editor_erase_begin(e, INK_ERASER_PRECISE, 2.0f, 0, 200, 150);
+  for (int i = 0; i <= 120; ++i)
+    ink_editor_erase_move(e, 200.0f + 40.0f * std::cos(i * 0.1f), 230.0f + 60.0f * std::sin(i * 0.07f));
+  ink_editor_erase_end(e);
+  InkSnapshot* snap = ink_editor_snapshot(e);
+  struct Case { float scale, ox, oy; int w, h; };
+  const Case cases[] = {{1.0f, 0, 0, 300, 300}, {3.0f, -60, -30, 512, 512}, {6.0f, -1000, -1200, 384, 384}};
+  int k = 0;
+  for (const Case& c : cases) {
+    std::vector<uint8_t> cpu(static_cast<size_t>(c.w) * c.h * 4, 255), gpuPx;
+    gpuPx = cpu;
+    ink_snapshot_render_over_rgba(snap, cpu.data(), c.w, c.h, c.w * 4, c.scale, c.ox, c.oy);
+    REQUIRE(ink_gpu_render_snapshot_over_rgba(gpu().gpu, snap, gpuPx.data(), c.w, c.h, c.w * 4, c.scale, c.ox, c.oy));
+    Diff d = compare(cpu, gpuPx, c.w, c.h);
+    std::printf("    erased, scale %.1f: max %d, mean %.4f, >8: %zu of %zu px\n", c.scale, d.maxDiff, d.mean, d.over8,
+                d.pixels);
+    dump("erased" + std::to_string(k++), cpu, gpuPx, c.w, c.h);
+    CHECK(d.maxDiff <= 4);
+    CHECK(d.mean < 1.0);
+  }
+  ink_snapshot_release(snap);
+  ink_editor_destroy(e);
+}
+
 TEST(gpu_strided_partial_render) {
   if (!gpu().gpu) return;
   std::vector<uint8_t> data = mixedPage();

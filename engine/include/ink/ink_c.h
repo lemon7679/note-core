@@ -116,6 +116,10 @@ typedef struct InkGeometryView {
   const InkStamp* stamps;
   size_t stamp_count;
   InkRect bounds;
+  /* Erased areas (precise eraser): after accumulating the ink, multiply its
+   * coverage (pencil: density) by (1 - coverage) of each of these capsules. */
+  const InkCapsule* holes;
+  size_t hole_count;
 } InkGeometryView;
 
 typedef struct InkLiveGeometry {

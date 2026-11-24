@@ -1,6 +1,7 @@
 #include "ink/svg_export.h"
 
 #include <cstdio>
+#include <string>
 
 #include "ink/spline.h"
 
@@ -107,6 +108,20 @@ void appendNum(std::string& out, float v) {
   out += s;
 }
 
+/// Outline of an eraser hole (capsule), slightly outside the exact shape so
+/// no sliver of erased ink survives the polygon approximation.
+std::vector<Vec2> holeOutline(const EraseHole& h, float tolerance) {
+  std::vector<Vec2> out;
+  const Vec2 d = h.b - h.a;
+  const float base = lengthSq(d) > 1e-12f ? angleOf(d) : 0.0f;
+  // Chords sag at most tol / 2 inside radius r + tol / 2: the polygon contains the capsule.
+  const float tol = std::max(0.5f * tolerance, 0.01f);
+  const float r = h.radius + tol;
+  arc(out, h.b, r, base - 0.5f * kPi, kPi, tol);
+  arc(out, h.a, r, base + 0.5f * kPi, kPi, tol);
+  return out;
+}
+
 }  // namespace
 
 StrokeOutline strokeOutline(const Stroke& stroke, float tolerance) {
@@ -155,6 +170,45 @@ std::string exportSvg(const Page& page, const SvgOptions& opts) {
         if (s.style.drawBehind != (pass == 0)) continue;
         StrokeOutline o = strokeOutline(s, opts.tolerance);
         if (o.polygon.size() < 2) continue;
+        // Erased areas: a mask of black capsules (polygons, so readers that only
+        // look at <path> elements still find just the ink outlines).
+        Rect inkBox;
+        for (Vec2 v : o.polygon) inkBox.expand(v);
+        inkBox = inkBox.inflated(o.strokeWidth + 1.0f);
+        std::string maskId;
+        for (const EraseHole& h : s.holes) {
+          if (!h.bounds().intersects(inkBox)) continue;
+          if (maskId.empty()) {
+            maskId = "e" + std::to_string(s.id);
+            out += "<mask id=\"" + maskId + "\" maskUnits=\"userSpaceOnUse\" x=\"";
+            appendNum(out, inkBox.minX);
+            out += "\" y=\"";
+            appendNum(out, inkBox.minY);
+            out += "\" width=\"";
+            appendNum(out, inkBox.width());
+            out += "\" height=\"";
+            appendNum(out, inkBox.height());
+            out += "\"><rect x=\"";
+            appendNum(out, inkBox.minX);
+            out += "\" y=\"";
+            appendNum(out, inkBox.minY);
+            out += "\" width=\"";
+            appendNum(out, inkBox.width());
+            out += "\" height=\"";
+            appendNum(out, inkBox.height());
+            out += "\" fill=\"#ffffff\"/>";
+          }
+          out += "<polygon points=\"";
+          std::vector<Vec2> poly = holeOutline(h, opts.tolerance);
+          for (size_t i = 0; i < poly.size(); ++i) {
+            if (i) out += " ";
+            appendNum(out, poly[i].x);
+            out += ",";
+            appendNum(out, poly[i].y);
+          }
+          out += "\" fill=\"#000000\"/>";
+        }
+        if (!maskId.empty()) out += "</mask>\n";
         float alpha = clamp01(s.style.opacity * s.style.color.a * o.meanAlpha);
         if (s.style.method == RenderMethod::Stamp) alpha *= 0.85f;  // graphite is never fully opaque
         out += "<path d=\"M";
@@ -179,6 +233,7 @@ std::string exportSvg(const Page& page, const SvgOptions& opts) {
           appendNum(out, alpha);
           out += "\"";
         }
+        if (!maskId.empty()) out += " mask=\"url(#" + maskId + ")\"";
         if (s.style.blend == BlendMode::Multiply) out += " style=\"mix-blend-mode:multiply\"";
         out += "/>\n";
       }

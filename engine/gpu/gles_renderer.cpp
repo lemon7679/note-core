@@ -375,6 +375,7 @@ struct Batch {
     geom.capsules.clear();
     geom.nibs.clear();
     geom.stamps.clear();
+    geom.holes.clear();
     box = PixelBox{};
     opaqueRun = false;
   }
@@ -607,6 +608,16 @@ void InkGpu::drawBatch(const Batch& b, GLuint dstFbo, int dstW, int dstH, int pi
     glBufferData(GL_ARRAY_BUFFER, b.geom.stamps.size() * sizeof(StampPrim), b.geom.stamps.data(), GL_STREAM_DRAW);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(b.geom.stamps.size()));
   }
+  if (!b.geom.holes.empty()) {
+    // Precise-eraser holes: coverage (or density) *= 1 - hole coverage, like the CPU rasterizer.
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
+    setView(capsule, pixClip, scale, ox, oy);
+    glBindVertexArray(vaoCapsule);
+    glBindBuffer(GL_ARRAY_BUFFER, vboCapsule);
+    glBufferData(GL_ARRAY_BUFFER, b.geom.holes.size() * sizeof(CapsulePrim), b.geom.holes.data(), GL_STREAM_DRAW);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(b.geom.holes.size()));
+  }
 
   // 2. Composite onto the destination.
   glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
@@ -656,6 +667,12 @@ void appendCulled(const StrokeGeometry& g, const Rect& cull, StrokeGeometry& out
     Rect r;
     r.expand(s.center, s.rMajor);
     if (r.intersects(cull)) out.stamps.push_back(s);
+  }
+  for (const CapsulePrim& c : g.holes) {
+    Rect r;
+    r.expand(c.p0, c.r0);
+    r.expand(c.p1, c.r1);
+    if (r.intersects(cull)) out.holes.push_back(c);
   }
 }
 
@@ -731,7 +748,8 @@ bool ink_gpu_render_snapshot_over_rgba(InkGpu* g, const InkSnapshot* s, uint8_t*
         std::shared_ptr<const StrokeGeometry> geom = snap.cache->get(sp, bucket);
         PixelBox box = toBox(t.apply(geom->bounds).inflated(2.0f), width, height);
         if (box.empty()) continue;
-        const bool opaque = sp->isOpaqueSolid();
+        // Holes mask only their own stroke: such a stroke never shares a coverage pass.
+        const bool opaque = sp->isOpaqueSolid() && geom->holes.empty();
         const bool joins = opaque && batch.opaqueRun && sameColor(batch.style.color, sp->style.color);
         if (!joins) {
           flush();

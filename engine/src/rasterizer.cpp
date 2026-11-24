@@ -417,6 +417,38 @@ inline StampPrim mapPrim(StampPrim p, const Affine& t, float s) {
   return p;
 }
 
+/// Precise-eraser holes: buf *= (1 - hole coverage), hole by hole (the GPU
+/// renderer blends the same product). Pixels fully inside a hole become 0.
+void applyHoles(const std::vector<CapsulePrim>& holes, const Affine& toPixel, bool identity, float s, const Rect& cull,
+                const Box& b, float* buf) {
+  if (holes.empty()) return;
+  const int W = b.width();
+  thread_local std::vector<float> hm;
+  for (const CapsulePrim& h : holes) {
+    if (!primBounds(h).intersects(cull)) continue;
+    CapsulePrim c = identity ? h : mapPrim(h, toPixel, s);
+    float r = c.r0, k = 1.0f;
+    thin(r, k);
+    // Hole coverage only inside the capsule's pixel box.
+    const float reach = r + 1.0f;
+    Box hb;
+    hb.x0 = std::max(b.x0, static_cast<int>(std::floor(std::min(c.p0.x, c.p1.x) - reach)));
+    hb.y0 = std::max(b.y0, static_cast<int>(std::floor(std::min(c.p0.y, c.p1.y) - reach)));
+    hb.x1 = std::min(b.x1, static_cast<int>(std::ceil(std::max(c.p0.x, c.p1.x) + reach)));
+    hb.y1 = std::min(b.y1, static_cast<int>(std::ceil(std::max(c.p0.y, c.p1.y) + reach)));
+    if (hb.empty()) continue;
+    const int HW = hb.width();
+    hm.assign(static_cast<size_t>(HW) * (hb.y1 - hb.y0), 0.0f);
+    rasterCapsule(c, hb, hm.data());
+    for (int y = hb.y0; y < hb.y1; ++y) {
+      const float* hrow = hm.data() + static_cast<size_t>(y - hb.y0) * HW;
+      float* row = buf + static_cast<size_t>(y - b.y0) * W + (hb.x0 - b.x0);
+      for (int x = 0; x < HW; ++x)
+        if (hrow[x] > 0.0f) row[x] *= 1.0f - std::min(hrow[x], 1.0f);
+    }
+  }
+}
+
 /// Coverage of `geom` (in geometry space; `toPixel` maps it to pixels) over the
 /// pixel box b. `pixelToGrain` maps pixel centres to page space for the grain.
 void coverage(const StrokeGeometry& geom, const StrokeStyle& style, const Affine& toPixel,
@@ -441,6 +473,7 @@ void coverage(const StrokeGeometry& geom, const StrokeStyle& style, const Affine
     if (!primBounds(n).intersects(cull)) continue;
     rasterNib(identity ? n : mapPrim(n, toPixel, s), b, m);
   }
+  applyHoles(geom.holes, toPixel, identity, s, cull, b, m);
   if (geom.stamps.empty()) return;
 
   thread_local std::vector<float> density, grainBuf;
@@ -464,6 +497,7 @@ void coverage(const StrokeGeometry& geom, const StrokeStyle& style, const Affine
     any = true;
   }
   if (!any) return;
+  applyHoles(geom.holes, toPixel, identity, s, cull, b, density.data());
   for (size_t i = 0; i < mask.size(); ++i) {
     const float d = density[i];
     if (d <= 0.0f) continue;

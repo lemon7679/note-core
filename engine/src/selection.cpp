@@ -109,6 +109,7 @@ StrokePtr transformedStroke(const Stroke& s, const Affine& t) {
     p.azimuth = wrapAngle(p.azimuth + rotation);
   }
   out->style.nibAngle = wrapAngle(out->style.nibAngle + rotation);
+  out->transformHoles(t);
   out->updateBounds();
   return out;
 }
@@ -151,6 +152,7 @@ ChangeSet duplicateStrokes(Page& page, LayerId layerId, const std::vector<Stroke
     auto copy = std::make_shared<Stroke>(s);
     copy->id = page.allocateStrokeId();
     for (StrokePoint& p : copy->points) p.pos += offset;
+    copy->translateHoles(offset);
     copy->updateBounds();
     lc.added.emplace_back(at++, std::move(copy));
   }

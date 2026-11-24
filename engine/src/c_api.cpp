@@ -115,6 +115,8 @@ InkGeometryView view(const StrokeGeometry& g) {
   v.stamps = reinterpret_cast<const InkStamp*>(g.stamps.data());
   v.stamp_count = g.stamps.size();
   v.bounds = toC(g.bounds);
+  v.holes = reinterpret_cast<const InkCapsule*>(g.holes.data());
+  v.hole_count = g.holes.size();
   return v;
 }
 

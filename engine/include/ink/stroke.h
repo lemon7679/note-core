@@ -30,17 +30,44 @@ struct StrokePoint {
   uint32_t flags = 0;
 };
 
+/// Area wiped by the precise eraser: a capsule (all points within `radius` of
+/// segment ab), page units. Ink of the stroke under it is not drawn, so the
+/// eraser removes exactly what it touched, also from wide strokes (a
+/// highlighter brushed at its edge gets a notch, not a full-height gap).
+struct EraseHole {
+  Vec2 a, b;
+  float radius = 0.0f;
+
+  Rect bounds() const {
+    Rect r;
+    r.expand(a, radius);
+    r.expand(b, radius);
+    return r;
+  }
+  /// True if every point of capsule (p, q, r) lies in this hole.
+  bool covers(Vec2 p, Vec2 q, float r) const {
+    return pointSegmentDistance(p, a, b) + r <= radius && pointSegmentDistance(q, a, b) + r <= radius;
+  }
+};
+
 struct Stroke {
   StrokeId id = 0;
   StrokeStyle style;
   uint32_t seed = 0;  ///< Deterministic randomness (pencil jitter).
   std::vector<StrokePoint> points;
+  /// Erased areas, masked out when rendering. Bounds are not shrunk by them.
+  std::vector<EraseHole> holes;
   Rect bounds;  ///< Conservative ink bounds (page units). Call updateBounds() after edits.
 
   void updateBounds();
   /// Half-extent of the ink footprint around a point of the given width.
   static float inkRadius(const StrokeStyle& style, float width);
   float length() const;
+  /// Moves the holes with the ink (points are mapped by the caller).
+  void transformHoles(const Affine& t);
+  void translateHoles(Vec2 offset);
+  /// Drops holes that no longer overlap the ink bounds (call after updateBounds()).
+  void pruneHoles();
   /// True when the stroke can be drawn straight onto the target without an
   /// isolated coverage pass (opaque, solid, normal blend, vector).
   bool isOpaqueSolid() const;

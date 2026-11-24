@@ -85,6 +85,7 @@ class PageEditor {
   bool erasing_ = false;
   EraserOptions eraserOpts_;
   Vec2 eraserPos_;
+  std::vector<Vec2> eraserRun_;  ///< Eraser path points of the current straight run.
 };
 
 }  // namespace ink

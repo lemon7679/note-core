@@ -61,12 +61,17 @@ struct StrokeGeometry {
   std::vector<CapsulePrim> capsules;
   std::vector<NibPrim> nibs;
   std::vector<StampPrim> stamps;
+  /// Erased areas (Stroke::holes as capsules with r0 = r1 = radius, a0 = a1 = 1).
+  /// After the ink is accumulated, its coverage (pencil: graphite density) is
+  /// multiplied by (1 - hole coverage) for each of them.
+  std::vector<CapsulePrim> holes;
   Rect bounds;
 
   void clear() {
     capsules.clear();
     nibs.clear();
     stamps.clear();
+    holes.clear();
     bounds = Rect();
   }
   bool empty() const { return capsules.empty() && nibs.empty() && stamps.empty(); }
