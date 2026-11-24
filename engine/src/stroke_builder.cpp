@@ -37,6 +37,8 @@ void StrokeBuilder::setViewScale(float viewPointsPerUnit) {
 void StrokeBuilder::resetState() {
   raw_.clear();
   points_.clear();
+  rawPos_.clear();
+  liveSmoother_.clear();
   aux_.clear();
   predicted_.clear();
   velocity_ = {};
@@ -70,15 +72,10 @@ void StrokeBuilder::begin(const InputPoint& p, uint32_t seed) {
   active_ = true;
   const BrushDynamics& dyn = brush_.dynamics;
   filter_.setParams(p.source == InputSource::Pencil ? dyn.smoothing.pencil : dyn.smoothing.touch);
-  // 글씨 보정's live part: a gentle moving average while writing (unless the
-  // user already picked an explicit stabilizer).
-  StabilizerParams stab = dyn.smoothing.stabilizer;
-  if (stab.mode == StabilizerMode::None && dyn.correction.enabled() && dyn.correction.liveStabilization) {
-    stab.mode = StabilizerMode::MovingAverage;
-    stab.amount = dyn.correction.liveWindowMs();
-    stab.catchUp = true;
-  }
-  stabilizer_.setParams(stab);
+  stabilizer_.setParams(dyn.smoothing.stabilizer);
+  // 글씨 보정's live part: the ink behind the pen settles into the corrected
+  // curve while writing (GoodNotes-style), instead of a lagging average.
+  if (dyn.correction.liveStabilization) liveSmoother_.reset(dyn.correction, unitsPerViewPoint(), dyn.width);
   startTime_ = lastInputTime_ = lastFilterTime_ = p.time;
   seed_ = seed != 0 ? seed
                     : hash32(static_cast<uint32_t>(p.time * 1000.0),
@@ -100,6 +97,7 @@ void StrokeBuilder::begin(const InputPoint& p, uint32_t seed) {
   sp.azimuth = p.azimuth;
   sp.time = 0.0f;
   points_.push_back(sp);
+  rawPos_.push_back(f);
   aux_.push_back(a);
   computeAttributes(0);
 
@@ -135,6 +133,7 @@ void StrokeBuilder::addPoint(const InputPoint& in) {
     return;
   }
   processFiltered(f, p.time, idx);
+  liveSmoother_.update(rawPos_, points_);
 
   predicted_.clear();  // stale; the platform sends a fresh prediction per event
   if (brush_.dynamics.builtInPrediction) buildPrediction();
@@ -188,6 +187,7 @@ void StrokeBuilder::appendControl(Vec2 pos, double time, uint32_t inputIndex) {
   sp.azimuth = in.azimuth;
   sp.time = static_cast<float>(time - startTime_);
   points_.push_back(sp);
+  rawPos_.push_back(pos);
   aux_.push_back(a);
   computeAttributes(points_.size() - 1);
 }
@@ -419,6 +419,9 @@ void StrokeBuilder::updateSnappedShape(Vec2 pen) {
   }
   currentShape_ = s;
   points_ = shapeToStrokePoints(s, snapTemplate_);
+  rawPos_.clear();
+  for (const StrokePoint& p : points_) rawPos_.push_back(p.pos);
+  liveSmoother_.clear();
   aux_.assign(points_.size(), Aux{});
   for (size_t i = 1; i < points_.size(); ++i)
     aux_[i].dist = aux_[i - 1].dist + distance(points_[i - 1].pos, points_[i].pos);
@@ -455,6 +458,13 @@ void StrokeBuilder::end() {
     if (sp.mode == StabilizerMode::None || sp.catchUp) {
       const uint32_t lastIdx = static_cast<uint32_t>(raw_.size() - 1);
       appendControl(raw_[lastIdx].input.pos, raw_[lastIdx].input.time, lastIdx);
+    }
+    // Hooks and correction work on the pen's own path, not on the live-smoothed
+    // preview of it (which would smooth twice). The preview used the same
+    // smoothing as the correction, so the stroke does not jump at pen-up.
+    if (liveSmoother_.active()) {
+      for (size_t i = 0; i < points_.size(); ++i) points_[i].pos = rawPos_[i];
+      liveSmoother_.clear();
     }
     removeHooks();
     applyCorrection();
@@ -499,6 +509,7 @@ void StrokeBuilder::removeHooks() {
         Vec2 d = normalize(points_[j + 1].pos - points_[j].pos, heading);
         if (dot(d, heading) < kCos) {
           points_.resize(j + 1);
+          rawPos_.resize(j + 1);
           aux_.resize(j + 1);
           break;
         }
@@ -520,6 +531,7 @@ void StrokeBuilder::removeHooks() {
         Vec2 d = normalize(points_[j].pos - points_[j - 1].pos, heading);
         if (dot(d, heading) < kCos) {
           points_.erase(points_.begin(), points_.begin() + static_cast<long>(j));
+          rawPos_.erase(rawPos_.begin(), rawPos_.begin() + static_cast<long>(j));
           aux_.erase(aux_.begin(), aux_.begin() + static_cast<long>(j));
           const float d0 = aux_[0].dist;
           for (Aux& a : aux_) a.dist -= d0;
@@ -568,6 +580,7 @@ size_t StrokeBuilder::stablePointCount() const {
   if (!active_) return n;
   if (snapped() || n == 0) return 0;
   size_t s = n - 1;  // the last point can still merge new pressure samples
+  if (liveSmoother_.active()) s = std::min(s, liveSmoother_.settled());
   size_t from = n > kAwaitWindow ? n - kAwaitWindow : 0;
   for (size_t i = from; i < n; ++i) {
     if (aux_[i].awaiting && lastInputTime_ - aux_[i].time < kAwaitTimeout) {

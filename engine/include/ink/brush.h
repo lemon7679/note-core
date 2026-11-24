@@ -99,14 +99,14 @@ struct SmoothingParams {
 struct CorrectionParams {
   /// 0 = off, 1 = strong. Scales every threshold below.
   float strength = 0.0f;
-  bool liveStabilization = true;  ///< Smooth while writing (adds a few ms of lag, disables prediction).
+  /// Smooth while writing: the ink behind the pen settles into the corrected
+  /// curve as the pen moves on (no lag; prediction stays on). See LiveSmoother.
+  bool liveStabilization = true;
   bool smoothCurves = true;       ///< Remove wobble from curved parts at pen-up.
   bool straightenLines = true;    ///< Near-straight segments become straight.
   bool snapToAxes = true;         ///< Near-horizontal / vertical segments become exact.
 
   bool enabled() const { return strength > 0.0f; }
-  /// Moving-average window (ms) used for live stabilization at this strength.
-  float liveWindowMs() const { return lerp(14.0f, 42.0f, clamp01(strength)); }
 };
 
 /// Everything needed to turn raw input into stroke points.

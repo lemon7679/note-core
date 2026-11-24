@@ -110,8 +110,13 @@ TEST(builder_estimated_pressure_updates) {
 TEST(builder_live_stable_geometry_is_prefix_of_final) {
   synth::Options o;
   auto in = synth::synthesize(synth::cursiveLoops({10, 50}, 4, 30), o);
-  for (BrushKind k : {BrushKind::Ballpoint, BrushKind::Pencil, BrushKind::Highlighter}) {
+  // Also with 글씨 보정's live smoothing, which rewrites the trail behind the pen.
+  const std::pair<BrushKind, float> cases[] = {{BrushKind::Ballpoint, 0.0f}, {BrushKind::Pencil, 0.0f},
+                                               {BrushKind::Highlighter, 0.0f}, {BrushKind::Ballpoint, 0.3f},
+                                               {BrushKind::FountainPen, 1.0f}};
+  for (const auto& [k, correction] : cases) {
     Brush brush = presets::forKind(k);
+    brush.dynamics.correction.strength = correction;
     StrokeBuilder b(brush);
     b.begin(in.front());
     TessellationOptions t;

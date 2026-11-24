@@ -313,6 +313,91 @@ TEST(correction_in_builder_and_on_existing_strokes) {
   for (size_t i = 0; i < before.size(); ++i) CHECK(ed.page().layers()[0].at(i) == before[i]);
 }
 
+TEST(correction_keeps_gentle_curves_curved) {
+  // A curve drawn downwards — the side of ( or ), a descender, a long sweep —
+  // used to be flattened into a (vertical) straight line at pen-up when it
+  // bulged less than a few percent of its length.
+  auto bulge = [](const std::vector<StrokePoint>& pts) {
+    Vec2 A = pts.front().pos, B = pts.back().pos;
+    float m = 0.0f;
+    for (const StrokePoint& q : pts) m = std::max(m, pointSegmentDistance(q.pos, A, B));
+    return m;
+  };
+  for (float strength : {0.3f, 0.6f, 1.0f}) {
+    for (float L : {40.0f, 80.0f, 150.0f}) {
+      for (float rel : {0.03f, 0.06f}) {
+        const float h = L * rel;
+        std::vector<Vec2> path;
+        for (int i = 0; i <= 200; ++i) {
+          float t = i / 200.0f;
+          path.push_back({50.0f + h * 4.0f * t * (1.0f - t), 10.0f + L * t});
+        }
+        Brush pen = presets::ballpoint();
+        pen.dynamics.correction.strength = strength;
+        pen.dynamics.snapOnHold = false;
+        auto in = synth::synthesize(path, synth::Options{});
+        StrokeBuilder b(pen);
+        b.begin(in.front());
+        for (size_t i = 1; i < in.size(); ++i) b.addPoint(in[i]);
+        b.end();
+        CHECK(b.correctionReport().straightened == 0);
+        CHECK(b.correctionReport().axisSnapped == 0);
+        CHECK_NEAR(bulge(b.points()), h, 0.12f * h + 0.1f);
+      }
+    }
+  }
+  // A wobbly but intended straight line is still straightened.
+  std::vector<Vec2> line;
+  for (int i = 0; i <= 160; ++i) line.push_back({20.0f + 0.4f * std::sin(i * 0.31f), 10.0f + i * 0.5f});
+  auto pts = toPoints(line);
+  CorrectionParams p;
+  p.strength = 0.3f;
+  CorrectionReport rep;
+  correctStroke(pts, p, 1.0f, &rep);
+  CHECK(rep.straightened == 1);
+  CHECK(rep.axisSnapped == 1);
+}
+
+TEST(correction_live_smoothing_follows_the_pen) {
+  // GoodNotes-style live correction: the ink at the pen is under the pen, the
+  // trail behind it settles into the smoothed curve while writing, settled
+  // points never move again, and pen-up does not make the curve jump.
+  auto in = synth::synthesize(synth::cursiveLoops({10, 50}, 4, 30), wobbly(7));
+  for (float strength : {0.3f, 1.0f}) {
+    Brush pen = presets::ballpoint();
+    pen.dynamics.correction.strength = strength;
+    pen.dynamics.correction.straightenLines = false;  // compare curves only
+    pen.dynamics.snapOnHold = false;
+    Brush plainPen = pen;
+    plainPen.dynamics.correction.strength = 0.0f;
+    StrokeBuilder b(pen), plain(plainPen);
+    b.begin(in.front());
+    plain.begin(in.front());
+    std::vector<Vec2> frozen;
+    for (size_t i = 1; i < in.size(); ++i) {
+      b.addPoint(in[i]);
+      plain.addPoint(in[i]);
+      // Same control points, same pen position: no lag at the pen.
+      REQUIRE(b.points().size() == plain.points().size());
+      CHECK(b.points().back().pos == plain.points().back().pos);
+      // Points that were stable stay exactly where they were.
+      for (size_t k = 0; k < frozen.size(); ++k) CHECK(b.points()[k].pos == frozen[k]);
+      for (size_t k = frozen.size(); k < b.stablePointCount(); ++k) frozen.push_back(b.points()[k].pos);
+    }
+    CHECK(frozen.size() > b.points().size() / 2);
+    // The trail is visibly smoothed while the pen is still down.
+    CHECK(roughness(b.points()) < roughness(plain.points()) * 0.85f);
+    std::vector<StrokePoint> live = b.points();
+    b.end();
+    // Pen-up: the corrected stroke is what was shown (corners may tighten a little).
+    std::vector<float> moved;
+    for (size_t k = 0; k < std::min(live.size(), b.points().size()); ++k)
+      moved.push_back(distance(live[k].pos, b.points()[k].pos));
+    std::sort(moved.begin(), moved.end());
+    CHECK(moved[moved.size() * 9 / 10] < 0.05f);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 글씨 보정: line straightening
 // ---------------------------------------------------------------------------

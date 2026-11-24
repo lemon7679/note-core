@@ -166,8 +166,9 @@ void ink_builder_set_builtin_prediction(InkBuilder* b, bool enabled);
 void ink_builder_set_view_scale(InkBuilder* b, float view_points_per_unit);
 
 /* 글씨 보정 (handwriting correction). strength 0 = off .. 1 = strong.
- * Applied when the pen lifts; with live stabilization the stroke is also
- * smoothed while writing. */
+ * Applied when the pen lifts; with live stabilization (default on) the ink
+ * behind the pen also settles into the corrected curve while writing
+ * (GoodNotes-style), with no lag at the pen. Gentle curves stay curves. */
 void ink_builder_set_correction(InkBuilder* b, float strength);
 void ink_builder_set_correction_options(InkBuilder* b, bool live_stabilization, bool smooth_curves,
                                         bool straighten_lines, bool snap_to_axes);

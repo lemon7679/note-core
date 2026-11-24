@@ -13,31 +13,38 @@ namespace {
 
 inline float rad(float degrees) { return degrees * kPi / 180.0f; }
 
-/// Arc-length parameterized view of a stroke's control polygon.
-struct ArcLength {
-  const std::vector<Vec2>& p;
-  std::vector<float> d;
+/// Point at arc length s along the polyline p (cumulative lengths d, d[0] = 0).
+Vec2 pointAtArc(const std::vector<Vec2>& p, const std::vector<float>& d, size_t n, float s) {
+  if (s <= 0.0f) return p[0];
+  if (s >= d[n - 1]) return p[n - 1];
+  size_t i = static_cast<size_t>(std::upper_bound(d.begin(), d.begin() + static_cast<long>(n), s) - d.begin());
+  float span = d[i] - d[i - 1];
+  return lerp(p[i - 1], p[i], span > 0.0f ? (s - d[i - 1]) / span : 0.0f);
+}
 
-  explicit ArcLength(const std::vector<Vec2>& pts) : p(pts), d(pts.size(), 0.0f) {
-    for (size_t i = 1; i < p.size(); ++i) d[i] = d[i - 1] + distance(p[i - 1], p[i]);
-  }
-  float total() const { return d.empty() ? 0.0f : d.back(); }
-  Vec2 at(float s) const {
-    if (s <= 0.0f) return p.front();
-    if (s >= total()) return p.back();
-    size_t i = static_cast<size_t>(std::upper_bound(d.begin(), d.end(), s) - d.begin());
-    float span = d[i] - d[i - 1];
-    return lerp(p[i - 1], p[i], span > 0.0f ? (s - d[i - 1]) / span : 0.0f);
-  }
-  /// Direction change at point i measured over +-w of arc length.
-  float turn(size_t i, float w) const {
-    Vec2 a = at(d[i] - w), b = at(d[i] + w);
-    Vec2 v1 = p[i] - a, v2 = b - p[i];
-    float l1 = length(v1), l2 = length(v2);
-    if (l1 < w * 0.3f || l2 < w * 0.3f) return 0.0f;
-    return std::acos(clamp(dot(v1, v2) / (l1 * l2), -1.0f, 1.0f));
-  }
-};
+/// Direction change at point i measured over +-w of arc length (first n points).
+float turnAt(const std::vector<Vec2>& p, const std::vector<float>& d, size_t n, size_t i, float w) {
+  Vec2 a = pointAtArc(p, d, n, d[i] - w), b = pointAtArc(p, d, n, d[i] + w);
+  Vec2 v1 = p[i] - a, v2 = b - p[i];
+  float l1 = length(v1), l2 = length(v2);
+  if (l1 < w * 0.3f || l2 < w * 0.3f) return 0.0f;
+  return std::acos(clamp(dot(v1, v2) / (l1 * l2), -1.0f, 1.0f));
+}
+
+/// Turn angle at i if it is a corner, else 0. A corner turns as much over half
+/// the window as over the whole window; a smooth curve turns only half as much.
+/// This keeps loops and bowls (ㅇ, ㅎ, 'e') from being chopped into pieces.
+float cornerTurn(const std::vector<Vec2>& p, const std::vector<float>& d, size_t n, size_t i, float w) {
+  float t1 = turnAt(p, d, n, i, w);
+  if (t1 < rad(45.0f)) return 0.0f;
+  if (turnAt(p, d, n, i, 0.5f * w) < 0.65f * t1) return 0.0f;
+  return t1;
+}
+
+/// Arc-length window over which corners are detected.
+float cornerWindow(float u, float typicalWidth) { return std::max(2.5f * u, 1.2f * typicalWidth); }
+/// Gaussian sigma of the curve smoothing at strength s.
+float smoothingSigma(float s, float u) { return lerp(0.4f, 2.0f, clamp01(s)) * u; }
 
 /// Disjoint-set union over segment boundary nodes.
 struct UnionFind {
@@ -50,12 +57,13 @@ struct UnionFind {
   void unite(size_t a, size_t b) { parent[find(a)] = find(b); }
 };
 
-/// Gaussian smoothing along arc length, restricted to points [a, b].
-/// Each neighbour is weighted by the arc length it represents, so uneven
-/// sample spacing (slow corners, fast strokes) does not bias the result.
+/// Gaussian smoothing along arc length, restricted to points [a, b] (only
+/// out[a..b] is written). Each neighbour is weighted by the arc length it
+/// represents, so uneven sample spacing (slow corners, fast strokes) does not
+/// bias the result.
 void gaussianAlongArc(const std::vector<Vec2>& in, const std::vector<float>& d, size_t a, size_t b, float sigma,
                       std::vector<Vec2>& out) {
-  out = in;
+  if (out.size() < in.size()) out.resize(in.size());
   const float reach = 3.0f * sigma;
   const float inv2s2 = 1.0f / (2.0f * sigma * sigma);
   size_t lo = a;
@@ -70,8 +78,50 @@ void gaussianAlongArc(const std::vector<Vec2>& in, const std::vector<float>& d, 
       sum += in[k] * w;
       wsum += w;
     }
-    if (wsum > 0.0f) out[j] = sum / wsum;
+    out[j] = wsum > 0.0f ? sum / wsum : in[j];
   }
+}
+
+/// Zero-shrink smoothing ("twicing", 2·G(x) − G(G(x))) of the segment between
+/// the pinned nodes a and b. Plain Gaussian smoothing pulls curves inward;
+/// twicing cancels that to second order while still removing tremor. The
+/// kernel runs over [lo, b] (lo >= a; a later lo saves work when only the
+/// points from `from` on are wanted) and points (max(a, from - 1), b) of `pts`
+/// are replaced.
+void smoothSegment(std::vector<Vec2>& pts, const std::vector<float>& d, size_t a, size_t lo, size_t b, size_t from,
+                   float sigma, std::vector<Vec2>& g1, std::vector<Vec2>& g2) {
+  gaussianAlongArc(pts, d, lo, b, sigma, g1);
+  gaussianAlongArc(g1, d, lo, b, sigma, g2);
+  for (size_t j = std::max(a + 1, from); j < b; ++j) {
+    float edge = std::min(d[j] - d[a], d[b] - d[j]);
+    float alpha = smoothstep(0.0f, 2.0f * sigma, edge);
+    pts[j] = lerp(pts[j], g1[j] * 2.0f - g2[j], alpha);
+  }
+}
+
+/// How far the segment [a, b] bends away from its chord at low frequency: the
+/// larger of its one-sided bow (half sine) and its S-swing (full sine)
+/// amplitude. Hand tremor wobbles around the line and averages out; a gentle
+/// intended curve does not.
+float lowFrequencyBend(const std::vector<Vec2>& pos, const std::vector<float>& d, size_t a, size_t b) {
+  const Vec2 A = pos[a];
+  const Vec2 nrm = perp(normalize(pos[b] - A));
+  const float span = d[b] - d[a];
+  if (span <= 0.0f) return 0.0f;
+  float bowNum = 0.0f, bowDen = 0.0f, sNum = 0.0f, sDen = 0.0f;
+  for (size_t j = a; j <= b; ++j) {
+    float t = (d[j] - d[a]) / span;
+    float share = 0.5f * (d[std::min(j + 1, b)] - d[j > a ? j - 1 : a]);
+    float off = dot(pos[j] - A, nrm);
+    float pb = std::sin(kPi * t), ps = std::sin(kTwoPi * t);
+    bowNum += share * off * pb;
+    bowDen += share * pb * pb;
+    sNum += share * off * ps;
+    sDen += share * ps * ps;
+  }
+  float bow = bowDen > 0.0f ? std::fabs(bowNum / bowDen) : 0.0f;
+  float swing = sDen > 0.0f ? std::fabs(sNum / sDen) : 0.0f;
+  return std::max(bow, swing);
 }
 
 float median(std::vector<float> v) {
@@ -93,21 +143,18 @@ bool correctStroke(std::vector<StrokePoint>& points, const CorrectionParams& par
 
   std::vector<Vec2> pos(n);
   std::vector<float> widths(n);
+  std::vector<float> arcD(n, 0.0f);
   for (size_t i = 0; i < n; ++i) {
     pos[i] = points[i].pos;
     widths[i] = points[i].width;
+    if (i > 0) arcD[i] = arcD[i - 1] + distance(pos[i - 1], pos[i]);
   }
-  const ArcLength arc(pos);
-  const float total = arc.total();
+  const float total = arcD.back();
   if (total < 3.0f * u) return false;  // dots and specks stay as they are
   const float medW = median(widths);
 
   // ---- 1. Corners: sharp, localized direction changes. ----------------------
-  // A corner turns as much over half the window as over the whole window; a
-  // smooth curve turns only half as much. This keeps loops and bowls (ㅇ, ㅎ,
-  // 'e') from being chopped into straight pieces.
-  const float w = std::max(2.5f * u, 1.2f * medW);
-  const float cornerAngle = rad(45.0f);
+  const float w = cornerWindow(u, medW);
   struct Cand { size_t i; float turn; };
   std::vector<Cand> cands;
   for (size_t i = 1; i + 1 < n; ++i) {
@@ -115,18 +162,16 @@ bool correctStroke(std::vector<StrokePoint>& points, const CorrectionParams& par
       cands.push_back({i, kPi});
       continue;
     }
-    if (arc.d[i] < 0.5f * w || total - arc.d[i] < 0.5f * w) continue;
-    float t1 = arc.turn(i, w);
-    if (t1 < cornerAngle) continue;
-    if (arc.turn(i, 0.5f * w) < 0.65f * t1) continue;
-    cands.push_back({i, t1});
+    if (arcD[i] < 0.5f * w || total - arcD[i] < 0.5f * w) continue;
+    float t1 = cornerTurn(pos, arcD, n, i, w);
+    if (t1 > 0.0f) cands.push_back({i, t1});
   }
   std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return x.turn > y.turn; });
   std::vector<size_t> nodes{0, n - 1};
   for (const Cand& c : cands) {
     bool clear = true;
     for (size_t k : nodes)
-      if (std::fabs(arc.d[k] - arc.d[c.i]) < w && k != 0 && k != n - 1) clear = false;
+      if (std::fabs(arcD[k] - arcD[c.i]) < w && k != 0 && k != n - 1) clear = false;
     if (clear) nodes.push_back(c.i);
   }
   std::sort(nodes.begin(), nodes.end());
@@ -144,10 +189,15 @@ bool correctStroke(std::vector<StrokePoint>& points, const CorrectionParams& par
     size_t a = nodes[k], b = nodes[k + 1];
     Vec2 A = pos[a], B = pos[b];
     float L = distance(A, B);
-    if (!params.straightenLines || L < 5.0f * u || arc.d[b] - arc.d[a] > L * arcTol) continue;
+    if (!params.straightenLines || L < 5.0f * u || arcD[b] - arcD[a] > L * arcTol) continue;
     float dev = 0.0f;
     for (size_t j = a + 1; j < b; ++j) dev = std::max(dev, pointSegmentDistance(pos[j], A, B));
     if (dev > L * devTol + 0.15f * u) continue;
+    // A gentle, intended curve (a descending sweep, the side of ( or ), a
+    // long bowl) stays within the tolerance above yet is plainly curved:
+    // flattening it is what made curves turn into straight lines at pen-up.
+    // Only wobble that is about the size of tremor is straightened.
+    if (lowFrequencyBend(pos, arcD, a, b) > 0.35f * u + L * lerp(0.006f, 0.014f, s)) continue;
     straight[k] = true;
     ++rep.straightened;
     if (!params.snapToAxes) continue;
@@ -185,29 +235,21 @@ bool correctStroke(std::vector<StrokePoint>& points, const CorrectionParams& par
 
   // ---- 4. Rebuild each segment. ---------------------------------------------
   std::vector<Vec2> out(pos);
-  const float sigma = lerp(0.4f, 2.0f, s) * u;
+  const float sigma = smoothingSigma(s, u);
   std::vector<Vec2> g1, g2;
   for (size_t k = 0; k < segs; ++k) {
     const size_t a = nodes[k], b = nodes[k + 1];
-    const float span = arc.d[b] - arc.d[a];
+    const float span = arcD[b] - arcD[a];
     const Vec2 A = newNode[k], B = newNode[k + 1];
     const Vec2 dA = A - pos[a], dB = B - pos[b];
     for (size_t j = a; j <= b; ++j) {
-      float t = span > 0.0f ? (arc.d[j] - arc.d[a]) / span : 0.0f;
+      float t = span > 0.0f ? (arcD[j] - arcD[a]) / span : 0.0f;
       // Straight: points slide onto the line, keeping their spacing (speed).
       out[j] = straight[k] ? lerp(A, B, t) : pos[j] + lerp(dA, dB, t);
     }
     if (straight[k] || !params.smoothCurves || b - a < 3 || span < 2.0f * sigma) continue;
-    // Zero-shrink smoothing ("twicing"): 2·G(x) − G(G(x)). Plain Gaussian
-    // smoothing pulls curves inward; twicing cancels that to second order
-    // while still removing tremor. Ends are pinned to the corners.
-    gaussianAlongArc(out, arc.d, a, b, sigma, g1);
-    gaussianAlongArc(g1, arc.d, a, b, sigma, g2);
-    for (size_t j = a + 1; j < b; ++j) {
-      float edge = std::min(arc.d[j] - arc.d[a], arc.d[b] - arc.d[j]);
-      float alpha = smoothstep(0.0f, 2.0f * sigma, edge);
-      out[j] = lerp(out[j], g1[j] * 2.0f - g2[j], alpha);
-    }
+    // Ends are pinned to the corners.
+    smoothSegment(out, arcD, a, a, b, a + 1, sigma, g1, g2);
   }
 
   bool changed = false;
@@ -219,6 +261,90 @@ bool correctStroke(std::vector<StrokePoint>& points, const CorrectionParams& par
   }
   if (report) *report = rep;
   return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Live smoothing
+// ---------------------------------------------------------------------------
+
+void LiveSmoother::reset(const CorrectionParams& params, float u, float typicalWidth) {
+  clear();
+  if (!params.enabled() || !params.smoothCurves) return;
+  sigma_ = smoothingSigma(params.strength, u);
+  w_ = cornerWindow(u, typicalWidth);
+  // A point's smoothed position depends on the raw points within 6σ (two
+  // Gaussian passes of reach 3σ) and on the corners around it; a corner is
+  // known once the pen is w past it and may still give way to a sharper one
+  // up to w further on.
+  settleDist_ = 2.0f * w_ + 6.0f * sigma_ + 0.01f * u;
+}
+
+void LiveSmoother::clear() {
+  sigma_ = w_ = settleDist_ = 0.0f;
+  d_.clear();
+  corners_.clear();
+  cornerTurns_.clear();
+  checked_ = 0;
+  settled_ = 0;
+}
+
+void LiveSmoother::update(const std::vector<Vec2>& raw, std::vector<StrokePoint>& pts) {
+  const size_t n = std::min(raw.size(), pts.size());
+  if (!active() || n == 0) return;
+  if (d_.size() > n) d_.resize(n);
+  if (d_.empty()) d_.push_back(0.0f);
+  while (d_.size() < n) d_.push_back(d_.back() + distance(raw[d_.size() - 1], raw[d_.size()]));
+  if (corners_.empty()) {
+    corners_.push_back(0);
+    cornerTurns_.push_back(0.0f);
+    checked_ = 1;
+  }
+  const size_t head = n - 1;
+  const float D = d_[head];
+
+  // Corners the pen has moved far enough past to judge (as in correctStroke,
+  // one per window, the sharper one wins).
+  while (checked_ < head && D - d_[checked_] >= w_) {
+    const size_t i = checked_++;
+    if (d_[i] < 0.5f * w_) continue;
+    float t = cornerTurn(raw, d_, n, i, w_);
+    if (t <= 0.0f) continue;
+    if (corners_.size() > 1 && d_[i] - d_[corners_.back()] < w_) {
+      if (t > cornerTurns_.back()) {
+        corners_.back() = i;
+        cornerTurns_.back() = t;
+      }
+    } else {
+      corners_.push_back(i);
+      cornerTurns_.push_back(t);
+    }
+  }
+
+  // Rewrite every point that is not settled yet, segment by segment.
+  // Only the window from 6σ before the first unsettled point is touched, so
+  // the cost per sample does not grow with the stroke.
+  size_t seg = static_cast<size_t>(std::upper_bound(corners_.begin(), corners_.end(), settled_) - corners_.begin()) - 1;
+  auto lookback = [&](size_t a, size_t from) {
+    size_t lo = from;
+    while (lo > a && d_[from] - d_[lo] <= 6.0f * sigma_) --lo;
+    return lo;
+  };
+  const size_t copyFrom = lookback(corners_[seg], std::max(settled_, corners_[seg]));
+  work_.resize(n);
+  std::copy(raw.begin() + static_cast<long>(copyFrom), raw.begin() + static_cast<long>(n),
+            work_.begin() + static_cast<long>(copyFrom));
+  for (; seg < corners_.size(); ++seg) {
+    const size_t a = corners_[seg];
+    const size_t b = seg + 1 < corners_.size() ? corners_[seg + 1] : head;
+    if (b <= a) continue;
+    const size_t from = std::max(settled_, a);
+    if (b - a >= 3 && d_[b] - d_[a] >= 2.0f * sigma_)
+      smoothSegment(work_, d_, a, lookback(a, from), b, from, sigma_, g1_, g2_);
+    for (size_t j = from; j < b; ++j) pts[j].pos = work_[j];
+  }
+  pts[head].pos = raw[head];  // the ink starts right under the pen
+
+  while (settled_ < head && D - d_[settled_] >= settleDist_) ++settled_;
 }
 
 ChangeSet correctStrokes(Page& page, LayerId layer, const std::vector<StrokeId>& ids, const CorrectionParams& params,

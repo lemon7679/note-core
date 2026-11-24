@@ -147,7 +147,7 @@ void applyBrush(InkBuilder* b) { b->builder.setBrush(b->brush); }
 
 extern "C" {
 
-const char* ink_version(void) { return "0.2.0"; }
+const char* ink_version(void) { return "0.2.1"; }
 
 void ink_free(void* p) { std::free(p); }
 

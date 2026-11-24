@@ -41,6 +41,8 @@ struct LiveGeometry {
 ///   raw input ─► 1€ filter ─► optional stabilizer ─► de-duplication
 ///   ─► speed estimate ─► pressure (EMA + curve, or simulated) ─► tilt
 ///   ─► width / opacity (+ start taper) ─► control point
+///   ─► live smoothing (글씨 보정: the trail behind the pen settles into the
+///      corrected curve while the ink at the pen stays under it)
 /// At pen-up: stabilizer catch-up, hook removal, end taper (+ short-stroke
 /// protection) and, if the pen rested, shape snapping.
 ///
@@ -169,6 +171,8 @@ class StrokeBuilder {
   std::vector<StabilizedSample> scratchStab_;
   std::vector<RawSample> raw_;
   std::vector<StrokePoint> points_;
+  std::vector<Vec2> rawPos_;  ///< points_ positions before live smoothing.
+  LiveSmoother liveSmoother_;
   std::vector<Aux> aux_;
   std::vector<StrokePoint> predicted_;
   Vec2 velocity_;  ///< Smoothed page-space velocity (prediction).

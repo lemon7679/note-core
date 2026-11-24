@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(InkEngine VERSION 0.2.0 LANGUAGES CXX)
+project(InkEngine VERSION 0.2.1 LANGUAGES CXX)
 
 option(INK_BUILD_TESTS "Build InkEngine unit tests" ON)
 option(INK_BUILD_TOOLS "Build InkEngine demo / tools" ON)

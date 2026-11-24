@@ -140,7 +140,7 @@ final class InkCanvasView: UIView {
 ```swift
 // 펜 설정 화면의 "글씨 보정" 슬라이더 (0 = 끔).
 ink_builder_set_correction(builder, Float(correctionSlider.value))
-// 세부 항목: 실시간 손떨림 보정, 곡선 다듬기, 직선 펴기, 수평·수직 맞춤
+// 세부 항목: 실시간 곡선 보정(펜 뒤에서 바로 자리 잡음), 곡선 다듬기, 직선 펴기, 수평·수직 맞춤
 ink_builder_set_correction_options(builder, true, true, true, true)
 
 // 그리고 멈추기: 기본 켜짐(볼펜·만년필·형광펜·마커). 펜별로 끄려면:
